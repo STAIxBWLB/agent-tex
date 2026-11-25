@@ -1,0 +1,34 @@
+{
+  "name": "@staix/agent-tex",
+  "version": "0.0.0",
+  "description": "Container-only LaTeX and Beamer builds for the agent family: structured diagnostics, checks and page renders over a CLI and an MCP server (atex)",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/STAIxBWLB/agent-tex.git"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "typescript": "^5.8.0"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "atex": "bin/atex.js"
+  },
+  "files": [
+    "src/",
+    "bin/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "bun x tsc --noEmit && bun scripts/check-boundary.ts && bun test && bun pm pack --dry-run"
+  }
+}
