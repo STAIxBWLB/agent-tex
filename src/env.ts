@@ -75,7 +75,8 @@ async function findRuntime(run: Exec): Promise<{ runtime: EnvReport["runtime"]; 
   return { runtime: null, detail: seen.join("; ") || `none of ${RUNTIMES.join(", ")} is installed`, next };
 }
 
-const NO_IMAGE = /no such (image|object)|not found|does not exist|unknown image/i;
+// Image-specific absence only (docker/nerdctl "No such image", podman "image not known"); a missing socket is not a missing image.
+const NO_IMAGE = /no such image|image not known/i;
 
 export async function envCheck(run: Exec = exec, image: ImagePin = IMAGE): Promise<EnvReport> {
   const ref = imageRef(image);
@@ -110,7 +111,7 @@ export async function envPull(run: Exec = exec, image: ImagePin = IMAGE): Promis
   if (res.code !== 0 && after.status !== "ready") {
     return {
       ...after,
-      detail: `${before.runtime.cli} pull failed (exit ${res.code}); its output above names the cause`,
+      detail: `${before.runtime.cli} pull failed (exit ${res.code}); its output on stderr names the cause`,
       next: `check network and registry access with ${before.runtime.cli} pull ${imageRef(image)}, then atex env pull`,
     };
   }

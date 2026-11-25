@@ -39,6 +39,17 @@ test("unreadable info output is not reported as a dead engine", async () => {
   expect(report.detail).toBe("docker answered with output atex could not read");
 });
 
+test("a missing socket during inspect is not reported as a missing image", async () => {
+  const report = await envCheck(fake({ "docker info": { code: 0, stdout: DOCKER_INFO }, "docker image": { code: 1, stderr: "dial unix /run/docker.sock: connect: no such file or directory (not found)" } }), PINNED);
+  expect(report.status).toBe("runtime-missing");
+});
+
+test("podman's missing-image wording is understood", async () => {
+  const info = JSON.stringify({ version: { Version: "5.2.0" }, host: { arch: "amd64" } });
+  const report = await envCheck(fake({ "podman info": { code: 0, stdout: info }, "podman image": { code: 125, stderr: "Error: x: image not known" } }), PINNED);
+  expect(report.status).toBe("image-missing");
+});
+
 test("an inspect failure other than a missing image is an environment problem", async () => {
   const report = await envCheck(fake({ "docker info": { code: 0, stdout: DOCKER_INFO }, "docker image": { code: 1, stderr: "permission denied while trying to connect" } }), PINNED);
   expect(report.status).toBe("runtime-missing");
@@ -87,7 +98,7 @@ test("a failed pull keeps a corrective next step", async () => {
     : argv[1] === "pull" ? { code: 1, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "No such image" };
   const report = await envPull(run, PINNED);
   expect(report.status).toBe("image-missing");
-  expect(report.detail).toBe("docker pull failed (exit 1); its output above names the cause");
+  expect(report.detail).toBe("docker pull failed (exit 1); its output on stderr names the cause");
   expect(report.next).toContain(`docker pull ${PINNED.repo}@${PINNED.digest}`);
 });
 

@@ -53,6 +53,8 @@ CASES = {
     "no job": (tar(("src/a.tex", b"x", "file")), "no .atex/job.json"),
     "unknown job field": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "variants": []}', "file"), ("src/a.tex", b"x", "file")), "does not support: variants"),
     "main not in snapshot": (tar((".atex/job.json", JOB, "file"),), "not in the snapshot"),
+    "engine of the wrong type": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "engine": ["pdflatex"]}', "file"), ("src/a.tex", b"x", "file")), "job.engine"),
+    "shellEscape of the wrong type": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "shellEscape": {}}', "file"), ("src/a.tex", b"x", "file")), "job.shellEscape"),
     "bad engine": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "engine": "tectonic"}', "file"), ("src/a.tex", b"x", "file")), "job.engine"),
 }
 
@@ -69,6 +71,11 @@ def main():
     ok = code == 2 and "exceeds" in err and "next: " in err
     failures += not ok
     print(f"{'ok  ' if ok else 'FAIL'} entry cap" + ("" if ok else f": exit {code}, stderr {err!r}"))
+    atex_run.INPUT_ENTRIES_MAX, atex_run.INPUT_BYTES_MAX, atex_run.HEADER_ROOM = 10_000, 0, 0
+    code, err = run(b"\0" * 4096)  # the raw budget refuses before tarfile parses a header
+    ok = code == 2 and "input stream exceeds" in err and "next: " in err
+    failures += not ok
+    print(f"{'ok  ' if ok else 'FAIL'} raw stream budget" + ("" if ok else f": exit {code}, stderr {err!r}"))
     return 1 if failures else 0
 
 

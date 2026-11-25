@@ -26,9 +26,31 @@ JOB_MAX = 1 << 20
 # Input caps sit above the host snapshot defaults (200 MiB, 5,000 files; #3) so a valid snapshot always fits.
 INPUT_BYTES_MAX = 256 << 20
 INPUT_ENTRIES_MAX = 10_000
+# Raw stdin budget, enforced before tarfile parses anything: member data plus generous header room per entry.
+HEADER_ROOM = 8 << 10
 # Output caps per artifact; an oversize artifact is omitted and listed in result.json.
 OUTPUT_MAX = {"pdf": 512 << 20, "log": 64 << 20, "fls": 16 << 20}
 PROTOCOL = "send the tar stream atex builds (stream protocol v1, issue #3)"
+SHRINK = "exclude large or generated files from the snapshot ([snapshot] exclude in atex.toml)"
+OVERSIZE_NEXT = {
+    "pdf": "reduce embedded image sizes or split the document so the PDF fits the cap",
+    "log": "fix the warnings that flood the log (see the first errors in the latexmk output)",
+    "fls": "reduce the number of input files the build reads",
+}
+
+
+class Budget:
+    """A read-only stream that refuses to read past a byte budget, so no input is unbounded."""
+
+    def __init__(self, raw, limit):
+        self.raw, self.left = raw, limit
+
+    def read(self, n=-1):
+        if self.left <= 0:
+            raise InputError(f"input stream exceeds {(INPUT_BYTES_MAX + INPUT_ENTRIES_MAX * HEADER_ROOM) >> 20} MiB", SHRINK)
+        data = self.raw.read(self.left if n is None or n < 0 else min(n, self.left))
+        self.left -= len(data)
+        return data
 
 
 class InputError(Exception):
@@ -54,12 +76,12 @@ def safe_rel(name):
 def read_input():
     job = None
     total = 0
-    with tarfile.open(fileobj=sys.stdin.buffer, mode="r|") as tar:
+    stream = Budget(sys.stdin.buffer, INPUT_BYTES_MAX + INPUT_ENTRIES_MAX * HEADER_ROOM)
+    with tarfile.open(fileobj=stream, mode="r|") as tar:
         for count, member in enumerate(tar, 1):
             total += max(member.size, 0)
             if count > INPUT_ENTRIES_MAX or total > INPUT_BYTES_MAX:
-                raise InputError(f"input tar exceeds {INPUT_ENTRIES_MAX} entries or {INPUT_BYTES_MAX >> 20} MiB",
-                                 "exclude large or generated files from the snapshot ([snapshot] exclude in atex.toml)")
+                raise InputError(f"input tar exceeds {INPUT_ENTRIES_MAX} entries or {INPUT_BYTES_MAX >> 20} MiB", SHRINK)
             rel = safe_rel(member.name)
             if rel is None:
                 if not member.isfile() or member.size > JOB_MAX:
@@ -89,9 +111,11 @@ def read_input():
         raise InputError("job.main must be a relative .tex path inside the project", "set main in atex.toml to a .tex file inside the project")
     if not os.path.isfile(os.path.join(SRC, main)):
         raise InputError(f"job.main {main!r} is not in the snapshot", "set main in atex.toml to a .tex file that exists and is not excluded")
-    if job.get("engine", "pdflatex") not in ENGINES:
+    engine = job.get("engine", "pdflatex")
+    if not isinstance(engine, str) or engine not in ENGINES:
         raise InputError(f"job.engine must be one of {', '.join(ENGINES)}", "set engine in atex.toml to pdflatex, xelatex or lualatex")
-    if job.get("shellEscape", "restricted") not in ("restricted", "unrestricted"):
+    shell = job.get("shellEscape", "restricted")
+    if not isinstance(shell, str) or shell not in ("restricted", "unrestricted"):
         raise InputError("job.shellEscape must be restricted or unrestricted")
     epoch = job.get("dateEpoch", 0)
     if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
@@ -142,7 +166,9 @@ def add_file(tar, name, path, result):
     size = os.path.getsize(path)
     cap = OUTPUT_MAX[name.rsplit(".", 1)[-1]]
     if size > cap:
-        result["omitted"].append({"path": name, "bytes": size, "cap": cap})
+        kind = name.rsplit(".", 1)[-1]
+        result["omitted"].append({"path": name, "bytes": size, "cap": cap, "next": OVERSIZE_NEXT[kind]})
+        sys.stderr.write(f"atex-run: {name} is {size} bytes, over its {cap}-byte cap; omitted\n  next: {OVERSIZE_NEXT[kind]}\n")
         return None
     digest = hashlib.sha256()
     with open(path, "rb") as f:
