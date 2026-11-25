@@ -87,13 +87,15 @@ def environment(job):
         HOME=home,
         TEXMFVAR=os.path.join(WORK, "texmf-var"),
         XDG_CACHE_HOME=os.path.join(WORK, "cache"),
-        max_print_line="100000",  # one log line per message, no wrapping
+        max_print_line="10000",  # no log wrapping; bibtex refuses values at or above its buf_size (20000)
         error_line="254",
         half_error_line="238",
         SOURCE_DATE_EPOCH=str(job.get("dateEpoch", 0)),
         FORCE_SOURCE_DATE="1",
+        # biber is a PAR-packed binary that unpacks and execs from its temp dir; /tmp is noexec.
+        PAR_GLOBAL_TMPDIR=os.path.join(WORK, "cache", "par"),
     )
-    for path in (home, env["TEXMFVAR"], env["XDG_CACHE_HOME"]):
+    for path in (home, env["TEXMFVAR"], env["XDG_CACHE_HOME"], env["PAR_GLOBAL_TMPDIR"]):
         os.makedirs(path, exist_ok=True)
     return env
 
