@@ -1,4 +1,5 @@
 import { envCheck, envPull, exec, type EnvReport, type Exec } from "./env.ts";
+import { IMAGE, type ImagePin } from "./image.ts";
 
 // Exit codes (issue #1): 0 success, 1 document problem, 2 usage or config error, 3 environment problem, 75 deferred.
 const USAGE = `atex: container-only LaTeX builds
@@ -9,7 +10,8 @@ Usage:
 
 Exit codes: 0 ready, 2 usage error, 3 runtime or image missing.`;
 
-export interface Io { out: (text: string) => void; err: (text: string) => void; exec: Exec }
+// `image` exists so CI can drive the real CLI path against a small pinned image; the CLI itself always uses IMAGE.
+export interface Io { out: (text: string) => void; err: (text: string) => void; exec: Exec; image?: ImagePin }
 
 const defaultIo: Io = { out: text => process.stdout.write(text), err: text => process.stderr.write(text), exec };
 
@@ -37,7 +39,8 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
     io.err(`atex: unknown command or argument: ${args.join(" ")}\n  next: atex --help\n`);
     return 2;
   }
-  const report = sub === "check" ? await envCheck(io.exec) : await envPull(io.exec);
+  const image = io.image ?? IMAGE;
+  const report = sub === "check" ? await envCheck(io.exec, image) : await envPull(io.exec, image);
   io.out(json ? `${JSON.stringify(report)}\n` : render(report));
   return report.status === "ready" ? 0 : 3;
 }

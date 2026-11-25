@@ -23,11 +23,30 @@ test("no runtime installed is runtime-missing", async () => {
 test("an installed CLI whose engine is down is runtime-missing and says so", async () => {
   const report = await envCheck(fake({ "docker info": { code: 1, stderr: "Cannot connect to the Docker daemon" } }), PINNED);
   expect(report.status).toBe("runtime-missing");
-  expect(report.detail).toContain("Cannot connect");
+  expect(report.detail).toBe("docker is installed but its engine did not answer (exit 1)");
+  expect(report.next).toContain("docker info");
+});
+
+test("raw runtime output never reaches the report", async () => {
+  const secret = "unix:///home/someone/.private/docker.sock";
+  const report = await envCheck(fake({ "docker info": { code: 1, stderr: `Cannot connect to ${secret}` } }), PINNED);
+  expect(JSON.stringify(report)).not.toContain(secret);
+});
+
+test("unreadable info output is not reported as a dead engine", async () => {
+  const report = await envCheck(fake({ "docker info": { code: 0, stdout: "not json" } }), PINNED);
+  expect(report.status).toBe("runtime-missing");
+  expect(report.detail).toBe("docker answered with output atex could not read");
+});
+
+test("an inspect failure other than a missing image is an environment problem", async () => {
+  const report = await envCheck(fake({ "docker info": { code: 0, stdout: DOCKER_INFO }, "docker image": { code: 1, stderr: "permission denied while trying to connect" } }), PINNED);
+  expect(report.status).toBe("runtime-missing");
+  expect(report.next).toContain("docker image ls");
 });
 
 test("runtime present without the pinned image is image-missing", async () => {
-  const report = await envCheck(fake({ "docker info": { code: 0, stdout: DOCKER_INFO }, "docker image": { code: 1, stderr: "No such image" } }), PINNED);
+  const report = await envCheck(fake({ "docker info": { code: 0, stdout: DOCKER_INFO }, "docker image": { code: 1, stderr: "Error: No such image: x" } }), PINNED);
   expect(report.status).toBe("image-missing");
   expect(report.runtime).toEqual({ kind: "docker", cli: "docker", version: "27.3.1", arch: "aarch64" });
   expect(report.next).toBe("atex env pull");
@@ -63,6 +82,15 @@ test("env pull pulls the pinned digest and re-checks", async () => {
   expect(calls).toContainEqual(["docker", "pull", `${PINNED.repo}@${PINNED.digest}`]);
 });
 
+test("a failed pull keeps a corrective next step", async () => {
+  const run: Exec = async argv => argv[1] === "info" ? { code: 0, stdout: DOCKER_INFO, stderr: "" }
+    : argv[1] === "pull" ? { code: 1, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "No such image" };
+  const report = await envPull(run, PINNED);
+  expect(report.status).toBe("image-missing");
+  expect(report.detail).toBe("docker pull failed (exit 1); its output above names the cause");
+  expect(report.next).toContain(`docker pull ${PINNED.repo}@${PINNED.digest}`);
+});
+
 test("cli: env check --json exits 3 when the runtime is missing, usage errors exit 2", async () => {
   let out = "";
   let err = "";
@@ -72,4 +100,8 @@ test("cli: env check --json exits 3 when the runtime is missing, usage errors ex
   expect(await main(["build"], io)).toBe(2);
   expect(err).toContain("next: atex --help");
   expect(await main(["--help"], io)).toBe(0);
+  out = "";
+  const ready = { ...io, image: PINNED, exec: fake({ "docker info": { code: 0, stdout: DOCKER_INFO }, "docker image": { code: 0, stdout: "{}" } }) };
+  expect(await main(["env", "check"], ready)).toBe(0);
+  expect(out).toContain("atex env: ready");
 });

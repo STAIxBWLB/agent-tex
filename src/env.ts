@@ -57,8 +57,10 @@ function field(obj: Record<string, unknown> | null, ...path: string[]): string {
   return typeof value === "string" ? value : "";
 }
 
-async function findRuntime(run: Exec): Promise<{ runtime: EnvReport["runtime"]; detail: string }> {
+// Details name a cause class and a local command to run; raw runtime output (socket paths, endpoints) never enters them.
+async function findRuntime(run: Exec): Promise<{ runtime: EnvReport["runtime"]; detail: string; next: string }> {
   const seen: string[] = [];
+  let next = "install or start a Docker-compatible runtime (docker, podman or nerdctl), then run atex env check";
   for (const cli of RUNTIMES) {
     const res = await run([cli, "info", "--format", "{{json .}}"], { timeoutMs: PROBE_MS });
     if (res.code === 127) continue;
@@ -66,28 +68,37 @@ async function findRuntime(run: Exec): Promise<{ runtime: EnvReport["runtime"]; 
     // docker and nerdctl report ServerVersion/Architecture; podman reports version.Version/host.arch.
     const version = field(info, "ServerVersion") || field(info, "version", "Version");
     const arch = field(info, "Architecture") || field(info, "host", "arch");
-    if (res.code === 0 && version) return { runtime: { kind: cli, cli, version, arch }, detail: "" };
-    seen.push(`${cli} is installed but its engine did not answer (${(res.stderr.trim().split("\n")[0] ?? "").slice(0, 200) || `exit ${res.code}`})`);
+    if (res.code === 0 && version) return { runtime: { kind: cli, cli, version, arch }, detail: "", next: "" };
+    seen.push(res.code === 0 ? `${cli} answered with output atex could not read` : `${cli} is installed but its engine did not answer (exit ${res.code})`);
+    if (seen.length === 1) next = `start the ${cli} engine; run ${cli} info to see why it fails, then atex env check`;
   }
-  return { runtime: null, detail: seen.join("; ") || `none of ${RUNTIMES.join(", ")} is installed` };
+  return { runtime: null, detail: seen.join("; ") || `none of ${RUNTIMES.join(", ")} is installed`, next };
 }
+
+const NO_IMAGE = /no such (image|object)|not found|does not exist|unknown image/i;
 
 export async function envCheck(run: Exec = exec, image: ImagePin = IMAGE): Promise<EnvReport> {
   const ref = imageRef(image);
   const base: EnvReport["image"] = { ref, digest: image.digest, present: false, arch: null };
-  const { runtime, detail } = await findRuntime(run);
-  if (!runtime) {
-    return { v: 1, status: "runtime-missing", runtime: null, image: base, detail, next: "install or start a Docker-compatible runtime (docker, podman or nerdctl), then run atex env check" };
-  }
+  const { runtime, detail, next } = await findRuntime(run);
+  if (!runtime) return { v: 1, status: "runtime-missing", runtime: null, image: base, detail, next };
   if (!image.digest) {
     return { v: 1, status: "image-missing", runtime, image: base, detail: "this atex build pins no image digest", next: "install an atex release that pins a published image" };
   }
   const res = await run([runtime.cli, "image", "inspect", "--format", "{{json .}}", ref], { timeoutMs: PROBE_MS });
   const info = parseJson(res.stdout.trim().split("\n")[0] ?? "");
-  if (res.code !== 0 || !info) {
-    return { v: 1, status: "image-missing", runtime, image: base, detail: `${ref} is not present in ${runtime.cli}`, next: "atex env pull" };
+  if (res.code === 0 && info) {
+    return { v: 1, status: "ready", runtime, image: { ...base, present: true, arch: field(info, "Architecture") || null } };
   }
-  return { v: 1, status: "ready", runtime, image: { ...base, present: true, arch: field(info, "Architecture") || null } };
+  if (res.code !== 0 && NO_IMAGE.test(res.stderr)) {
+    return { v: 1, status: "image-missing", runtime, image: base, detail: `the pinned image is not present in ${runtime.cli}`, next: "atex env pull" };
+  }
+  // The engine answered info but cannot inspect images: an environment problem, not a missing image.
+  return {
+    v: 1, status: "runtime-missing", runtime, image: base,
+    detail: res.code === 0 ? `${runtime.cli} image inspect returned output atex could not read` : `${runtime.cli} could not inspect images (exit ${res.code})`,
+    next: `run ${runtime.cli} image ls to see why, then atex env check`,
+  };
 }
 
 export async function envPull(run: Exec = exec, image: ImagePin = IMAGE): Promise<EnvReport> {
@@ -97,7 +108,11 @@ export async function envPull(run: Exec = exec, image: ImagePin = IMAGE): Promis
   const res = await run([before.runtime.cli, "pull", imageRef(image)], { toStderr: true });
   const after = await envCheck(run, image);
   if (res.code !== 0 && after.status !== "ready") {
-    return { ...after, detail: `${before.runtime.cli} pull exited ${res.code}`, next: `check the network and registry access, then run atex env pull` };
+    return {
+      ...after,
+      detail: `${before.runtime.cli} pull failed (exit ${res.code}); its output above names the cause`,
+      next: `check network and registry access with ${before.runtime.cli} pull ${imageRef(image)}, then atex env pull`,
+    };
   }
   return after;
 }
