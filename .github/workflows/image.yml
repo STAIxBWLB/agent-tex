@@ -67,7 +67,8 @@ jobs:
           docker push "$REPO:${tag}-${{ matrix.arch }}"
 
   env-cli:
-    # AC3 against a real runtime: the CLI path with the unpinned build, a small pinned image, and no runtime on PATH.
+    # AC3 against a real runtime: the CLI path before the pinned image is present, with no runtime on PATH, with a small
+    # pinned image, and the default pull of the pinned release image (AC4).
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -88,7 +89,7 @@ jobs:
             [ "$code" = "$want_code" ] && [ "$status" = "$want_status" ] || { echo "expected exit $want_code, $want_status"; echo "$out"; exit 1; }
           }
           bun="$(command -v bun)"
-          expect 3 image-missing bun bin/atex.js env check --json
+          expect 3 image-missing bun bin/atex.js env check --json  # pinned release image not pulled yet
           expect 3 runtime-missing env PATH=/nonexistent "$bun" bin/atex.js env check --json
           digest=$(docker buildx imagetools inspect hello-world --format '{{json .Manifest}}' | jq -r .digest)
           docker image rm -f "hello-world@$digest" >/dev/null 2>&1 || true
@@ -102,6 +103,13 @@ jobs:
           expect 3 image-missing bun drive.ts env check --json
           expect 0 ready bun drive.ts env pull --json
           expect 0 ready bun drive.ts env check --json
+      - name: atex env pull of the pinned release image
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          set +e; out=$(bun bin/atex.js env pull --json); code=$?; set -e
+          echo "atex env pull -> exit $code, $(jq -r .status <<< "$out")"
+          [ "$code" = 0 ] && [ "$(jq -r .status <<< "$out")" = ready ] || { echo "$out"; exit 1; }
+          bun bin/atex.js env check
 
   publish:
     if: startsWith(github.ref, 'refs/tags/image-v')
