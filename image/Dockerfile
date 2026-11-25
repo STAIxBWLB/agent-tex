@@ -2,6 +2,9 @@
 # The base is pinned by its multi-arch index digest (amd64 and arm64); see issue #2.
 ARG BASE=texlive/texlive:latest-full@sha256:b20c42c2a5b1be892c26e6d3b896e9aa20350528ddd0d4444d23e5925ea1545d
 FROM ${BASE}
+LABEL org.opencontainers.image.source=https://github.com/STAIxBWLB/agent-tex \
+      org.opencontainers.image.description="atex environment: TeX Live scheme-full and atex-run" \
+      org.opencontainers.image.licenses=MIT
 
 # Redistributable additions only; image/LICENSES.md lists each one.
 RUN apt-get update \
