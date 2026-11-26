@@ -12,7 +12,8 @@ Steps 1 and 2 need npm 11.15 or later (`npm trust`).
 
    ```sh
    (set -e
-   cd "$(mktemp -d)"
+   d=$(mktemp -d)
+   cd "$d"
    printf '%s\n' '{"name":"@staix/agent-tex","version":"0.0.0-stage","description":"Name reservation for trusted publishing. Install 0.1.0 or later.","license":"MIT","repository":{"type":"git","url":"git+https://github.com/STAIxBWLB/agent-tex.git"}}' > package.json
    printf '%s\n' '# @staix/agent-tex' '' 'Name reservation. Install 0.1.0 or later.' > README.md
    npm publish --access public --tag stage
