@@ -4,7 +4,7 @@ name: Image
 # The pin job fails when src/image.ts and the registry disagree (issue #2 AC4).
 on:
   pull_request:
-    paths: [image/**, src/image.ts, .github/workflows/image.yml]
+    paths: [image/**, src/**, test/container.test.ts, .github/workflows/image.yml]
   push:
     branches: [main]
     paths: [image/**, src/image.ts, .github/workflows/image.yml]
@@ -54,6 +54,10 @@ jobs:
           docker run --rm --network none atex:test tex --version | head -1 | tee /dev/stderr | grep -q "TeX Live ${tag%%.*}"
       - name: Fixtures (no network, read-only root, non-root, no capabilities; font cache reuse)
         run: python3 image/test-fixtures.py atex:test
+      - name: atex build against the tested image (issue #3 container tests)
+        env:
+          ATEX_TEST_IMAGE: atex:test
+        run: bun test test/container.test.ts
       - name: Push the tested image for this architecture
         if: startsWith(github.ref, 'refs/tags/image-v')
         env:
@@ -120,6 +124,18 @@ jobs:
           echo "atex env pull -> exit $code, $(jq -r .status <<< "$out")"
           [ "$code" = 0 ] && [ "$(jq -r .status <<< "$out")" = ready ] || { echo "$out"; exit 1; }
           bun bin/atex.js env check
+      - name: Build a PDF with the default pinned image
+        run: |
+          project=$(mktemp -d "$RUNNER_TEMP/atex-pinned.XXXXXX")
+          cp -R image/fixtures/pdflatex-bibtex/. "$project"
+          rm "$project/job.json"
+          expected=$(bun bin/atex.js env check --json | jq -er '.image.ref')
+          (
+            cd "$project"
+            XDG_STATE_HOME="$RUNNER_TEMP/atex-pinned-state" bun "$GITHUB_WORKSPACE/bin/atex.js" build --json > "$RUNNER_TEMP/atex-pinned-build.json"
+            test -s paper.pdf
+          )
+          jq -e --arg image "$expected" '.status == "ok" and .receipt.image == $image' "$RUNNER_TEMP/atex-pinned-build.json"
 
   publish:
     if: startsWith(github.ref, 'refs/tags/image-v')

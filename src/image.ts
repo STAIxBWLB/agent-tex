@@ -2,8 +2,8 @@
 // `${repo}:${tag}`; the image workflow fails when it differs from the registry.
 export const IMAGE = {
   repo: "ghcr.io/staixbwlb/agent-tex",
-  tag: "2026.1",
-  digest: "sha256:bd9273f6214afb77a1521e0fa90e6a75b23eb555b3923e149e1f5c118f6af906",
+  tag: "2026.2",
+  digest: "sha256:5ff4bdb27e976f81f0c6462e2cc1af28217cac8af5260152c53b3f13a49c5e30",
 } as const;
 
 export type ImagePin = { repo: string; tag: string; digest: string };

@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """atex-run: the only entry point of the atex image.
 
-Stream protocol v1, P1 subset (full protocol: issue #3).
-stdin:  tar with `.atex/job.json` ({v: 1, main, engine, dateEpoch, shellEscape}) and sources under `src/`.
-stdout: tar with `result.json`, `out/<name>.pdf` (only on success), `log/<name>.log`, `deps/<name>.fls`.
+Stream protocol v1 (issue #3).
+stdin:  tar with `.atex/job.json` ({v: 1, main, engine, variants, dateEpoch, shellEscape, latexmkrc, fresh}),
+        sources under `src/` and extras under `ext/<as>/`.
+stdout: tar with `result.json`, `out/<name>.pdf` (only when every variant built), `log/<name>.log`, `deps/<name>.fls`.
+The /work volume keeps `src/` and the intermediates between builds; sources missing from a new snapshot are deleted.
 stderr: progress (latexmk output).
 Exit: 0 built, 1 document failure (tar still written), 2 bad job or input tar (no tar written; stderr names the cause and next step).
 Caps: input entries and bytes, and each output artifact (oversize artifacts are omitted and listed in result.json).
 """
+import contextlib
 import hashlib
 import io
 import json
 import os
 import posixpath
+import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -20,8 +25,13 @@ import time
 
 WORK = os.environ.get("ATEX_WORK", "/work")
 SRC = os.path.join(WORK, "src")
+EXT = os.path.join(WORK, "ext")
+MANIFEST = os.path.join(WORK, "sources.json")
 ENGINES = {"pdflatex": "-pdf", "xelatex": "-xelatex", "lualatex": "-lualatex"}
-JOB_KEYS = {"v", "main", "engine", "dateEpoch", "shellEscape"}  # P1 subset; P2 (#3) adds variants, steps, render, limits
+JOB_KEYS = {"v", "main", "engine", "variants", "dateEpoch", "shellEscape", "latexmkrc", "fresh"}
+NAME = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+OPTION = re.compile(r"^[A-Za-z0-9=._-]{1,64}$")
+CLASS = re.compile(r"\\documentclass\s*(?:\[[^\]]*\])?\s*\{\s*([A-Za-z0-9._-]+)\s*\}")
 JOB_MAX = 1 << 20
 # Input caps sit above the host snapshot defaults (200 MiB, 5,000 files; #3) so a valid snapshot always fits.
 INPUT_BYTES_MAX = 256 << 20
@@ -60,23 +70,23 @@ class InputError(Exception):
 
 
 def safe_rel(name):
-    """Return a normalized relative path under src/, or None for the job entry; reject anything else."""
+    """Return the normalized path under src/ or ext/<as>/, or None for the job entry; reject anything else."""
     if name.startswith("/") or "\\" in name:
         raise InputError(f"input tar entry {name!r} is absolute or uses backslashes")
     norm = posixpath.normpath(name)
     if norm == ".atex/job.json":
         return None
-    if norm == "src":
-        return ""
-    if not norm.startswith("src/") or ".." in norm.split("/"):
-        raise InputError(f"input tar entry {name!r} is outside src/")
-    return norm[4:]
+    parts = norm.split("/")
+    if ".." in parts or parts[0] not in ("src", "ext") or (parts[0] == "ext" and (len(parts) < 2 or not NAME.match(parts[1]))):
+        raise InputError(f"input tar entry {name!r} is outside src/ and ext/<as>/")
+    return norm
 
 
-def read_input():
+def read_input(stdin=None):
     job = None
     total = 0
-    stream = Budget(sys.stdin.buffer, INPUT_BYTES_MAX + INPUT_ENTRIES_MAX * HEADER_ROOM)
+    received = []
+    stream = Budget(stdin or sys.stdin.buffer, INPUT_BYTES_MAX + INPUT_ENTRIES_MAX * HEADER_ROOM)
     with tarfile.open(fileobj=stream, mode="r|") as tar:
         for count, member in enumerate(tar, 1):
             total += max(member.size, 0)
@@ -87,12 +97,24 @@ def read_input():
                 if not member.isfile() or member.size > JOB_MAX:
                     raise InputError(".atex/job.json must be a regular file under 1 MiB")
                 job = json.loads(tar.extractfile(member).read().decode("utf-8"))
+                check_job(job)
+                if job.get("fresh"):
+                    shutil.rmtree(SRC, ignore_errors=True)
+                shutil.rmtree(EXT, ignore_errors=True)  # extras carry no intermediates; resend them whole
                 continue
-            target = os.path.join(SRC, rel)
+            if job is None:
+                raise InputError("input tar must start with .atex/job.json")
+            target = os.path.join(WORK, rel)
             if member.isdir():
+                if os.path.isfile(target):
+                    os.remove(target)
                 os.makedirs(target, exist_ok=True)
             elif member.isfile():
+                if os.path.isdir(target):
+                    shutil.rmtree(target)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
+                if rel.startswith("src/"):
+                    received.append(rel[4:])
                 with open(target, "wb") as out:
                     src = tar.extractfile(member)
                     while chunk := src.read(1 << 16):
@@ -100,6 +122,31 @@ def read_input():
             else:
                 raise InputError(f"input tar entry {member.name!r} is not a regular file or directory",
                                  "replace links and special files in the project with regular files")
+    if job is None:
+        raise InputError("input tar has no .atex/job.json")
+    main = job["main"]
+    if main not in received:  # a source left from the previous build does not count
+        raise InputError(f"job.main {main!r} is not in the snapshot", "set main in atex.toml to a .tex file that exists and is not excluded")
+    sync(received)
+    return job
+
+
+def sync(received):
+    """Delete sources the previous build received and this one did not; intermediates stay for latexmk."""
+    try:
+        with open(MANIFEST) as f:
+            previous = set(json.load(f))
+    except (OSError, ValueError):
+        previous = set()
+    for rel in sorted(previous - set(received)):
+        path = os.path.join(SRC, rel)
+        if os.path.isfile(path) and not os.path.islink(path):
+            os.remove(path)
+    with open(MANIFEST, "w") as f:
+        json.dump(sorted(received), f)
+
+
+def check_job(job):
     if not isinstance(job, dict) or job.get("v") != 1:
         raise InputError("input tar has no .atex/job.json with v: 1")
     unknown = sorted(set(job) - JOB_KEYS)
@@ -109,8 +156,6 @@ def read_input():
     main = job.get("main")
     if not isinstance(main, str) or not main.endswith(".tex") or main.startswith("/") or ".." in main.split("/"):
         raise InputError("job.main must be a relative .tex path inside the project", "set main in atex.toml to a .tex file inside the project")
-    if not os.path.isfile(os.path.join(SRC, main)):
-        raise InputError(f"job.main {main!r} is not in the snapshot", "set main in atex.toml to a .tex file that exists and is not excluded")
     engine = job.get("engine", "pdflatex")
     if not isinstance(engine, str) or engine not in ENGINES:
         raise InputError(f"job.engine must be one of {', '.join(ENGINES)}", "set engine in atex.toml to pdflatex, xelatex or lualatex")
@@ -120,7 +165,20 @@ def read_input():
     epoch = job.get("dateEpoch", 0)
     if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
         raise InputError("job.dateEpoch must be a non-negative integer")
-    return job
+    for key in ("latexmkrc", "fresh"):
+        if not isinstance(job.get(key, False), bool):
+            raise InputError(f"job.{key} must be true or false")
+    variants = job.get("variants", [])
+    if not isinstance(variants, list) or len(variants) > 16:
+        raise InputError("job.variants must be a list of at most 16 variants")
+    names = set()
+    for v in variants:
+        ok = isinstance(v, dict) and set(v) <= {"name", "classOptions"} and isinstance(v.get("name"), str) and NAME.match(v["name"])
+        opts = v.get("classOptions", []) if isinstance(v, dict) else None
+        if not ok or not isinstance(opts, list) or not all(isinstance(o, str) and OPTION.match(o) for o in opts) or v["name"] in names:
+            raise InputError("job.variants entries need a distinct plain name and plain classOptions",
+                             "use names and options made of letters, digits, . _ - and =")
+        names.add(v["name"])
 
 
 def environment(job):
@@ -140,6 +198,10 @@ def environment(job):
     )
     for path in (home, env["TEXMFVAR"], env["XDG_CACHE_HOME"], env["PAR_GLOBAL_TMPDIR"]):
         os.makedirs(path, exist_ok=True)
+    if os.path.isdir(EXT):
+        # `//` searches subdirectories; the trailing `:` keeps the default TeX search path.
+        search = "".join(f"{os.path.join(EXT, d)}//:" for d in sorted(os.listdir(EXT)))
+        env.update(TEXINPUTS=search, BIBINPUTS=search, BSTINPUTS=search)
     return env
 
 
@@ -161,14 +223,18 @@ def add_bytes(tar, name, data):
     tar.addfile(info, io.BytesIO(data))
 
 
+def omit(name, size, result):
+    kind = name.rsplit(".", 1)[-1]
+    cap = OUTPUT_MAX[kind]
+    result["omitted"].append({"path": name, "bytes": size, "cap": cap, "next": OVERSIZE_NEXT[kind]})
+    sys.stderr.write(f"atex-run: {name} is {size} bytes, over its {cap}-byte cap; omitted\n  next: {OVERSIZE_NEXT[kind]}\n")
+
+
 def add_file(tar, name, path, result):
     """Stream one artifact into the tar, refusing anything over its cap. Returns its sha256 or None."""
     size = os.path.getsize(path)
-    cap = OUTPUT_MAX[name.rsplit(".", 1)[-1]]
-    if size > cap:
-        kind = name.rsplit(".", 1)[-1]
-        result["omitted"].append({"path": name, "bytes": size, "cap": cap, "next": OVERSIZE_NEXT[kind]})
-        sys.stderr.write(f"atex-run: {name} is {size} bytes, over its {cap}-byte cap; omitted\n  next: {OVERSIZE_NEXT[kind]}\n")
+    if size > OUTPUT_MAX[name.rsplit(".", 1)[-1]]:
+        omit(name, size, result)
         return None
     digest = hashlib.sha256()
     with open(path, "rb") as f:
@@ -182,40 +248,75 @@ def add_file(tar, name, path, result):
     return digest.hexdigest()
 
 
+def discard():
+    """A refused input may have been half written: drop the cached sources so no partial snapshot is built later."""
+    shutil.rmtree(SRC, ignore_errors=True)
+    shutil.rmtree(EXT, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        os.remove(MANIFEST)
+
+
 def main():
     try:
         job = read_input()
     except InputError as err:
+        discard()
         sys.stderr.write(f"atex-run: {err}\n  next: {err.next_step}\n")
         return 2
     except (tarfile.TarError, ValueError, OSError) as err:  # ValueError covers JSON and UTF-8 decoding
+        discard()
         sys.stderr.write(f"atex-run: unreadable input ({type(err).__name__}: {err})\n  next: {PROTOCOL}\n")
         return 2
     main_tex = job["main"]
     engine = job.get("engine", "pdflatex")
     cwd = os.path.join(SRC, posixpath.dirname(main_tex))
-    name = posixpath.basename(main_tex)[: -len(".tex")]
-    # -norc: no latexmkrc from the project or the image runs; project configuration needs an explicit opt-in (later phase).
-    cmd = ["latexmk", "-norc", ENGINES[engine], "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "-recorder"]
-    if job.get("shellEscape") == "unrestricted":
-        cmd.append("-shell-escape")
-    cmd.append(posixpath.basename(main_tex))
-    started = time.monotonic()
-    # latexmk's stdout goes to stderr: stdout carries only the result tar.
-    code = subprocess.run(cmd, cwd=cwd, env=environment(job), stdin=subprocess.DEVNULL, stdout=sys.stderr.fileno()).returncode
-    seconds = round(time.monotonic() - started, 3)
-    pdf = os.path.join(cwd, f"{name}.pdf")
-    result = {"v": 1, "status": "failed", "steps": [{"name": "latexmk", "exitCode": code, "seconds": seconds}], "outputs": [], "omitted": []}
+    base = posixpath.basename(main_tex)[: -len(".tex")]
+    with open(os.path.join(SRC, main_tex), encoding="utf-8", errors="replace") as f:
+        match = CLASS.search(f.read())
+    variants = job.get("variants") or [{"name": None}]
+    env = environment(job)
+    result = {"v": 1, "status": "ok", "steps": [], "outputs": [], "omitted": []}
+    built = []
+    for variant in variants:
+        name = f"{base}-{variant['name']}" if variant["name"] else base
+        # -norc: no latexmkrc runs unless atex.toml opts in (latexmkrc = true).
+        cmd = ["latexmk"] + ([] if job.get("latexmkrc") else ["-norc"])
+        cmd += [ENGINES[engine], "-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "-recorder", f"-jobname={name}"]
+        if job.get("shellEscape") == "unrestricted":
+            cmd.append("-shell-escape")
+        options = variant.get("classOptions") or []
+        if options and match:
+            cmd.append(f"-usepretex=\\PassOptionsToClass{{{','.join(options)}}}{{{match.group(1)}}}")
+        cmd.append(posixpath.basename(main_tex))
+        pdf = os.path.join(cwd, f"{name}.pdf")
+        before = os.stat(pdf).st_mtime_ns if os.path.isfile(pdf) else None
+        started = time.monotonic()
+        # latexmk's stdout goes to stderr: stdout carries only the result tar.
+        code = subprocess.run(cmd, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=sys.stderr.fileno()).returncode
+        after = os.stat(pdf).st_mtime_ns if os.path.isfile(pdf) else None
+        step = "latexmk" if not variant["name"] else f"latexmk:{variant['name']}"
+        result["steps"].append({"name": step, "exitCode": code, "seconds": round(time.monotonic() - started, 3),
+                                "upToDate": code == 0 and before is not None and before == after})
+        built.append((name, variant["name"] or "default", pdf))
+        if code != 0 or after is None:
+            result["status"] = "failed"
+            break
     with tarfile.open(fileobj=sys.stdout.buffer, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-        if code == 0 and os.path.isfile(pdf):
-            sha = add_file(tar, f"out/{name}.pdf", pdf, result)
-            if sha:
-                result["status"] = "ok"
-                result["outputs"].append({"variant": "default", "path": f"out/{name}.pdf", "sha256": sha, "pages": pages(pdf)})
-        for ext, folder in (("log", "log"), ("fls", "deps")):
-            path = os.path.join(cwd, f"{name}.{ext}")
-            if os.path.isfile(path):
-                add_file(tar, f"{folder}/{name}.{ext}", path, result)
+        # The host takes every PDF or none: check every size before adding the first.
+        if result["status"] == "ok" and any(os.path.getsize(pdf) > OUTPUT_MAX["pdf"] for _, _, pdf in built):
+            result["status"] = "failed"
+            for name, _, pdf in built:
+                if os.path.getsize(pdf) > OUTPUT_MAX["pdf"]:
+                    omit(f"out/{name}.pdf", os.path.getsize(pdf), result)
+        if result["status"] == "ok":
+            for name, variant, pdf in built:
+                sha = add_file(tar, f"out/{name}.pdf", pdf, result)
+                result["outputs"].append({"variant": variant, "path": f"out/{name}.pdf", "sha256": sha, "pages": pages(pdf)})
+        for name, _, _ in built:
+            for ext, folder in (("log", "log"), ("fls", "deps")):
+                path = os.path.join(cwd, f"{name}.{ext}")
+                if os.path.isfile(path):
+                    add_file(tar, f"{folder}/{name}.{ext}", path, result)
         add_bytes(tar, "result.json", json.dumps(result, separators=(",", ":")).encode())
     return 0 if result["status"] == "ok" else 1
 
