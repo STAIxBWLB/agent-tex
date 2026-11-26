@@ -133,6 +133,14 @@ test("variants build one PDF each; the job carries them; the receipt id hashes t
   expect(JSON.parse(readFileSync(join(env(root).XDG_STATE_HOME, "atex", "projects", readdirSync(join(env(root).XDG_STATE_HOME, "atex", "projects"))[0]!, "last", "receipt.json"), "utf8")).id).toBe(id);
 });
 
+test("a runtime that exits without a result tar is an environment problem, not a document one", async () => {
+  const root = project({ "paper.tex": DOC });
+  const run = Object.assign(async () => ({ code: 1, stdout: new Uint8Array() }), { calls: 0 });
+  const { io: dead, log } = io(run);
+  expect(await build({ cwd: root, env: env(root) }, dead)).toBe(3);
+  expect(log.err).toContain("could not run the build container (exit 1)");
+});
+
 test("docker argv: isolation flags, limits, no implicit pull, a per-project volume", () => {
   const argv = dockerArgv("podman", "atex-0123456789abcdef", { cpus: 2, memory: "4g", pids: 512 }, "img@sha256:x");
   for (const flag of ["--rm", "-i", "--read-only", "--network none", "--pull never", "--cap-drop ALL", "--security-opt no-new-privileges", "--user 1000:1000", "--tmpfs /tmp", "--cpus 2", "--memory 4g", "--pids-limit 512"]) {

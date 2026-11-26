@@ -81,6 +81,9 @@ export async function build(opts: BuildOptions, io: BuildIo): Promise<number> {
   if (res.code !== 0 && res.code !== 1) {
     if (res.code === 2) return fail(io, 3, "the image refused the build input", "atex env check; the pinned image and this atex release must match");
     if (res.code === 137) return fail(io, 3, "the container was killed (exit 137), usually by the memory limit", "raise [limits] memory in the user config");
+  }
+  // A stopped engine or a missing image exits without writing a result tar (docker exits 1 or 125).
+  if (res.code !== 0 && (res.code !== 1 || res.stdout.length === 0)) {
     return fail(io, 3, `${cli} could not run the build container (exit ${res.code})`, "atex env check, then atex env pull if the image is missing");
   }
   let output: { result: Result; pdfs: Map<string, Uint8Array>; log: string };
