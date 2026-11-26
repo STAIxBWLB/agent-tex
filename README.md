@@ -52,6 +52,8 @@ maxFiles = 5000
 
 Never sent, whatever the rules say: `.git`, `.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ecdsa*`, `id_ed25519*`, `.npmrc`, `.netrc`. Also left out by default: `node_modules`, LaTeX intermediates (`.bbl` is kept) and the output PDFs. A symlink leaving the project fails the build before any container starts.
 
+Builds are reproducible for a fixed `date`: a `--fresh` rebuild gives the same PDF bytes and receipt id. CI asserts this for pdfLaTeX and measured it for XeLaTeX (fontspec) and LuaLaTeX, identical on amd64 and arm64 with image `2026.2`.
+
 Container limits come from `~/.config/atex/config.toml`:
 
 ```toml
