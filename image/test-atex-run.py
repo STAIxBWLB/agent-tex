@@ -31,9 +31,14 @@ def tar(*entries):
     return buf.getvalue()
 
 
+def use(work):
+    atex_run.WORK = work
+    atex_run.SRC, atex_run.EXT, atex_run.MANIFEST = (os.path.join(work, n) for n in ("src", "ext", "sources.json"))
+
+
 def run(payload):
     with tempfile.TemporaryDirectory() as work:
-        atex_run.SRC = os.path.join(work, "src")
+        use(work)
         stdin, err = sys.stdin, io.StringIO()
         sys.stdin = io.TextIOWrapper(io.BytesIO(payload))
         try:
@@ -49,14 +54,35 @@ CASES = {
     "malformed job JSON": (tar((".atex/job.json", b"{v:", "file"), ("src/a.tex", b"x", "file")), "unreadable input"),
     "entry outside src/": (tar((".atex/job.json", JOB, "file"), ("etc/a.tex", b"x", "file")), "outside src/"),
     "path escape": (tar((".atex/job.json", JOB, "file"), ("src/../../a.tex", b"x", "file")), "outside src/"),
+    "ext without a plain name": (tar((".atex/job.json", JOB, "file"), ("ext/$x/a.sty", b"x", "file")), "outside src/"),
+    "source before the job": (tar(("src/a.tex", b"x", "file"), (".atex/job.json", JOB, "file")), "must start with .atex/job.json"),
     "symlink": (tar((".atex/job.json", JOB, "file"), ("src/a.tex", b"", "link")), "not a regular file"),
-    "no job": (tar(("src/a.tex", b"x", "file")), "no .atex/job.json"),
-    "unknown job field": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "variants": []}', "file"), ("src/a.tex", b"x", "file")), "does not support: variants"),
+    "no job": (tar(("src/a.tex", b"x", "file")), ".atex/job.json"),
+    "unknown job field": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "steps": []}', "file"), ("src/a.tex", b"x", "file")), "does not support: steps"),
+    "variant with an unsafe option": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "variants": [{"name": "h", "classOptions": ["}\\\\x"]}]}', "file"), ("src/a.tex", b"x", "file")), "job.variants"),
+    "duplicate variant": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "variants": [{"name": "h"}, {"name": "h"}]}', "file"), ("src/a.tex", b"x", "file")), "job.variants"),
+    "fresh of the wrong type": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "fresh": "yes"}', "file"), ("src/a.tex", b"x", "file")), "job.fresh"),
     "main not in snapshot": (tar((".atex/job.json", JOB, "file"),), "not in the snapshot"),
     "engine of the wrong type": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "engine": ["pdflatex"]}', "file"), ("src/a.tex", b"x", "file")), "job.engine"),
     "shellEscape of the wrong type": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "shellEscape": {}}', "file"), ("src/a.tex", b"x", "file")), "job.shellEscape"),
     "bad engine": (tar((".atex/job.json", b'{"v": 1, "main": "a.tex", "engine": "tectonic"}', "file"), ("src/a.tex", b"x", "file")), "job.engine"),
 }
+
+
+def sync_ok():
+    """T2 (#3): a source missing from the next snapshot leaves the volume; intermediates stay; fresh empties src/."""
+    with tempfile.TemporaryDirectory() as work:
+        use(work)
+        atex_run.read_input(io.BytesIO(tar((".atex/job.json", JOB, "file"), ("src/a.tex", b"x", "file"), ("src/old.tex", b"o", "file"))))
+        open(os.path.join(work, "src", "a.aux"), "w").close()
+        atex_run.read_input(io.BytesIO(tar((".atex/job.json", JOB, "file"), ("src/a.tex", b"x", "file"))))
+        kept = sorted(os.listdir(os.path.join(work, "src")))
+        fresh = b'{"v": 1, "main": "a.tex", "fresh": true}'
+        atex_run.read_input(io.BytesIO(tar((".atex/job.json", fresh, "file"), ("src/a.tex", b"x", "file"))))
+        after = sorted(os.listdir(os.path.join(work, "src")))
+    ok = kept == ["a.aux", "a.tex"] and after == ["a.tex"]
+    print(f"{'ok  ' if ok else 'FAIL'} sync and fresh" + ("" if ok else f": {kept} then {after}"))
+    return ok
 
 
 def main():
@@ -66,6 +92,7 @@ def main():
         ok = code == 2 and expected in err and "next: " in err and "Traceback" not in err
         failures += not ok
         print(f"{'ok  ' if ok else 'FAIL'} {label}" + ("" if ok else f": exit {code}, stderr {err!r}"))
+    failures += not sync_ok()
     atex_run.INPUT_ENTRIES_MAX = 2
     code, err = run(tar((".atex/job.json", JOB, "file"), ("src/a.tex", b"x", "file"), ("src/b.tex", b"x", "file")))
     ok = code == 2 and "exceeds" in err and "next: " in err

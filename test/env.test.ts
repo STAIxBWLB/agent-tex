@@ -108,7 +108,7 @@ test("cli: env check --json exits 3 when the runtime is missing, usage errors ex
   const io = { out: (t: string) => { out += t; }, err: (t: string) => { err += t; }, exec: fake({}) };
   expect(await main(["env", "check", "--json"], io)).toBe(3);
   expect(JSON.parse(out).status).toBe("runtime-missing");
-  expect(await main(["build"], io)).toBe(2);
+  expect(await main(["compile"], io)).toBe(2);
   expect(err).toContain("next: atex --help");
   expect(await main(["--help"], io)).toBe(0);
   out = "";
