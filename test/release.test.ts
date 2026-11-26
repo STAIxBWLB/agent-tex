@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { assertPackageFiles, distTagFor, releaseSection } from "../scripts/release.ts";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertPackageFiles, distTagFor, inspectStaged, releaseSection } from "../scripts/release.ts";
 import { main } from "../src/cli.ts";
 import pkg from "../package.json";
 
@@ -30,4 +33,9 @@ test("atex --version prints the package version", async () => {
   const io = { out: (t: string) => { out += t; }, err: () => {}, exec: async () => ({ code: 127, stdout: "", stderr: "" }) };
   expect(await main(["--version"], io)).toBe(0);
   expect(out.trim()).toBe(pkg.version);
+});
+
+test("a missing staged tarball names the local read, not git or GitHub credentials", () => {
+  const dir = mkdtempSync(join(tmpdir(), "atex-release-test-"));
+  expect(() => inspectStaged(dir)).toThrow("release artifact read: local file problem; check that the stage directory holds a readable regular package.tgz");
 });

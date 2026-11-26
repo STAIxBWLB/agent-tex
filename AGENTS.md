@@ -13,7 +13,7 @@
 - Keep unimplemented phases out of the CLI and README command list.
 - Public repo: no internal host names, accounts or manuscript names in code, tests, issues or PRs.
 - Conventional English commits, no coauthor trailers unless requested.
-- Release: `bun run release:prepare X.Y.Z` on a branch, merge its PR, then `bun run release:tag` on an up-to-date `main` (only on the owner's instruction). A `v*` tag publishes to npm only when the repository variable `NPM_PUBLISH_ENABLED` is `true`; a new image needs its own `image-v<tag>` first.
+- Release: follow `docs/releasing.md` (read it before any release step). Agents run `release:prepare` on a branch; tagging, the npm bootstrap and repository settings only on the owner's instruction.
 
 <!-- AGENT_HUB:BEGIN (managed by `ahub init`, edits inside are overwritten) -->
 ## agent-hub

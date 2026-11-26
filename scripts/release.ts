@@ -69,8 +69,11 @@ function trackedFiles(root: string): string[] {
   return command("git", ["ls-files", "--", "src", "bin", "package.json", "README.md", "CHANGELOG.md", "LICENSE"], root).trim().split("\n").filter(Boolean);
 }
 function archiveFiles(archive: string, root: string): string[] {
-  const names = command("tar", ["-tzf", archive], root).trim().split("\n").filter(Boolean);
-  const modes = command("tar", ["-tvzf", archive], root).trim().split("\n").filter(Boolean);
+  let names: string[], modes: string[];
+  try {
+    names = command("tar", ["-tzf", archive], root).trim().split("\n").filter(Boolean);
+    modes = command("tar", ["-tvzf", archive], root).trim().split("\n").filter(Boolean);
+  } catch (error) { throw releaseFailure("release archive listing (tar)", error, "check that tar is installed and package.tgz is a valid gzip tar, then stage a new artifact"); }
   if (modes.length !== names.length || modes.some(line => !["-", "d"].includes(line[0] ?? ""))) fail("archive must contain only regular files and directories, never links");
   const files: string[] = [];
   for (const member of names) {
@@ -95,7 +98,11 @@ export function assertManifest(raw: unknown, expected: ReleaseIdentity, hash: st
   return raw as unknown as ReleaseManifest;
 }
 export function inspectStaged(dir: string, root = process.cwd(), env: NodeJS.ProcessEnv = process.env): { manifest: ReleaseManifest; packed: unknown } {
-  const archive = join(resolve(dir), "package.tgz"), bytes = readBytesBounded(archive, ARCHIVE_BYTES, { noFollow: true }), hash = createHash("sha256").update(bytes).digest("hex"), raw = json(join(dir, "manifest.json"));
+  const archive = join(resolve(dir), "package.tgz");
+  let bytes: Buffer;
+  try { bytes = readBytesBounded(archive, ARCHIVE_BYTES, { noFollow: true }); }
+  catch (error) { throw releaseFailure("release artifact read", error, "check that the stage directory holds a readable regular package.tgz under 16 MiB from release:stage, then rerun", "local file problem"); }
+  const hash = createHash("sha256").update(bytes).digest("hex"), raw = json(join(dir, "manifest.json"));
   const expected = identity(root, env);
   // Check the digest before asking tar to inspect any artifact data.
   if (!plain(raw) || raw.sha256 !== hash) fail("staged tarball SHA-256 does not match its manifest");
@@ -117,14 +124,23 @@ export function stageRelease(dir: string, root = process.cwd()): ReleaseManifest
   if (!isAbsolute(dir) || !isAbsolute(fromRoot) && fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`)) fail("stage directory must be absolute and outside the checkout");
   if (command("git", ["status", "--porcelain=v1", "--untracked-files=all"], root).trim()) fail("commit the complete candidate before staging");
   if (existsSync(target)) fail("stage directory already exists; choose a fresh directory");
-  mkdirSync(target, { mode: 0o700 }); const work = mkdtempSync(join(tmpdir(), "atex-release-pack-"));
+  try { mkdirSync(target, { mode: 0o700 }); }
+  catch (error) { throw releaseFailure("release stage directory", error, "choose a fresh absolute directory whose parent exists and is writable, then rerun", "local file problem"); }
+  const work = mkdtempSync(join(tmpdir(), "atex-release-pack-"));
   try {
-    const raw: unknown = JSON.parse(command("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", target], root, isolatedEnv(work)));
+    let output: string;
+    try { output = command("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", target], root, isolatedEnv(work)); }
+    catch (error) { throw releaseFailure("release stage npm pack", error, "check that npm is installed and on PATH and that npm pack succeeds in the checkout, then rerun"); }
+    let raw: unknown;
+    try { raw = JSON.parse(output); } catch { fail("npm pack printed invalid JSON"); }
     // npm 11 prints an array of packs; npm 12 prints an object keyed by package name.
     const packed: unknown = plain(raw) ? Object.values(raw) : raw;
     if (!Array.isArray(packed) || packed.length !== 1 || !plain(packed[0]) || packed[0].name !== expected.name || packed[0].version !== expected.version || typeof packed[0].filename !== "string" || !/^[A-Za-z0-9._-]+\.tgz$/.test(packed[0].filename)) fail("npm pack must stage exactly one matching package");
-    renameSync(join(target, packed[0].filename), join(target, "package.tgz"));
-    const bytes = readBytesBounded(join(target, "package.tgz"), ARCHIVE_BYTES, { noFollow: true });
+    let bytes: Buffer;
+    try {
+      renameSync(join(target, packed[0].filename), join(target, "package.tgz"));
+      bytes = readBytesBounded(join(target, "package.tgz"), ARCHIVE_BYTES, { noFollow: true });
+    } catch (error) { throw releaseFailure("release stage tarball read", error, "check the stage directory for a readable regular package.tgz under 16 MiB, then rerun", "local file problem"); }
     const manifest: ReleaseManifest = { ...expected, sha256: createHash("sha256").update(bytes).digest("hex"), distTag: distTagFor(expected.version) };
     writeAtomic(join(target, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n", METADATA_BYTES, 0o600);
     return verifyStaged(target, root);
