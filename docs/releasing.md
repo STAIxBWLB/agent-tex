@@ -6,14 +6,17 @@ How `@staix/agent-tex` reaches npm. The steps that publish or change repository 
 
 npm trusted publishing can only be attached to a package that already exists, and `@staix/agent-tex` does not exist yet. The family convention is a placeholder version `0.0.0-stage` published once by hand, then trust, then every real version through the release workflow with provenance. The placeholder never takes a version the workflow needs.
 
-1. Publish the placeholder from an empty directory, logged in to npm as an owner of the `@staix` scope (2FA prompts as usual):
+Steps 1 and 2 need npm 11.15 or later (`npm trust`).
+
+1. Publish the placeholder from an empty directory, logged in to npm as an owner of the `@staix` scope (2FA prompts as usual). The subshell stops at the first failure, so nothing is written outside the new directory:
 
    ```sh
-   d=$(mktemp -d) && cd "$d"
+   (set -e
+   cd "$(mktemp -d)"
    printf '%s\n' '{"name":"@staix/agent-tex","version":"0.0.0-stage","description":"Name reservation for trusted publishing. Install 0.1.0 or later.","license":"MIT","repository":{"type":"git","url":"git+https://github.com/STAIxBWLB/agent-tex.git"}}' > package.json
    printf '%s\n' '# @staix/agent-tex' '' 'Name reservation. Install 0.1.0 or later.' > README.md
    npm publish --access public --tag stage
-   npm deprecate @staix/agent-tex@0.0.0-stage "name reservation; install 0.1.0 or later"
+   npm deprecate @staix/agent-tex@0.0.0-stage "name reservation; install 0.1.0 or later")
    ```
 
 2. Attach GitHub Actions trust (the workflow file, repository and environment must match `release.yml`):
