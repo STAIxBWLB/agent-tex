@@ -3,8 +3,7 @@ import { createHash } from "node:crypto";
 import type { Limits } from "../config.ts";
 import { OUTPUT_CAPS, ProtocolError } from "../protocol.ts";
 
-/** The cache volume: one per executor and project root. */
-// ponytail: two concurrent builds of one project share the volume unguarded; add a per-volume lock if that happens in practice.
+/** The cache volume: one per executor and project root. build() holds a per-project lock around its use. */
 export function volumeName(cli: string, root: string): string {
   return `atex-${createHash("sha256").update(`${cli}\0${root}`).digest("hex").slice(0, 16)}`;
 }

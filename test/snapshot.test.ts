@@ -22,6 +22,14 @@ test("AC5: secrets, .git and intermediates never enter the tar stream; .bbl and 
   expect(names.sort()).toEqual([".atex/job.json", "src/.atexignore", "src/fig/plot.pdf", "src/paper.aux", "src/paper.bbl", "src/paper.tex"]);
 });
 
+test("AC5: a permitted link that resolves to a secret is not sent", async () => {
+  const root = project({ "paper.tex": DOC, ".env": "TOKEN=x", ".git/config": "g" });
+  symlinkSync(join(root, ".env"), join(root, "settings.txt"));
+  symlinkSync(join(root, ".git"), join(root, "repo"));
+  const { names } = await sent(root);
+  expect(names.sort()).toEqual([".atex/job.json", "src/paper.tex"]);
+});
+
 test("AC9: caps and escaping symlinks fail during the scan, before any container", () => {
   const big = project({ "paper.tex": DOC, "atex.toml": "[snapshot]\nmaxBytes = 100\n", "data.bin": "x".repeat(200) });
   expect(() => scan(loadConfig({ cwd: big, env: env(big) }))).toThrow("over 100 bytes");

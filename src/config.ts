@@ -1,5 +1,5 @@
 // Project config (atex.toml), user config and the detection rules of issue #3.
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -32,12 +32,35 @@ const NAME = /^[A-Za-z0-9._-]{1,64}$/;
 const OPTION = /^[A-Za-z0-9=._-]{1,64}$/;
 const DAY = 86_400;
 
+/**
+ * Read a regular file, refusing special files. Over `max` bytes it fails, unless `head` asks for just the first `max`
+ * bytes (enough for detection in a large .tex file).
+ */
+export function readBounded(file: string, max: number, what: string, head = false): string {
+  let fd: number;
+  try { fd = openSync(file, constants.O_RDONLY | constants.O_NONBLOCK); }
+  catch { throw new ConfigError(`${what} cannot be opened`, `check that ${what} exists and is readable`); }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw new ConfigError(`${what} is not a regular file`, `replace ${what} with a regular file`);
+    if (st.size > max && !head) throw new ConfigError(`${what} is over ${max} bytes`, `shorten ${what}`);
+    const data = Buffer.alloc(Math.min(st.size, max));
+    let off = 0;
+    for (let n; off < data.length && (n = readSync(fd, data, off, data.length - off, off)) > 0;) off += n;
+    return data.subarray(0, off).toString("utf8");
+  } finally { closeSync(fd); }
+}
+
+const CONFIG_MAX = 64 << 10;
+const TEX_HEAD = 1 << 20;
+
 type Table = Record<string, unknown>;
 const isTable = (v: unknown): v is Table => !!v && typeof v === "object" && !Array.isArray(v);
 
 function parseToml(file: string): Table {
   let data: unknown;
-  try { data = Bun.TOML.parse(readFileSync(file, "utf8")); }
+  const text = readBounded(file, CONFIG_MAX, basename(file));
+  try { data = Bun.TOML.parse(text); }
   catch (error) { throw new ConfigError(`${basename(file)} is not valid TOML (${(error as Error).message})`, `fix the syntax of ${basename(file)}`); }
   return data as Table;
 }
@@ -86,7 +109,7 @@ export function detectMain(root: string): string {
   const candidates = readdirSync(root, { withFileTypes: true })
     .filter(e => e.isFile() && e.name.endsWith(".tex"))
     .map(e => e.name)
-    .filter(name => /\\documentclass\b/.test(readFileSync(join(root, name), "utf8")))
+    .filter(name => /\\documentclass\b/.test(readBounded(join(root, name), TEX_HEAD, name, true)))
     .sort();
   if (candidates.length === 1) return candidates[0]!;
   throw new ConfigError(
@@ -127,7 +150,7 @@ export function loadConfig(opts: LoadOptions): Config {
   if (!main.endsWith(".tex") || isAbsolute(main) || main.split("/").includes("..") || !existsSync(join(root, main)) || !statSync(join(root, main)).isFile()) {
     throw new ConfigError(`main file ${main} is not a .tex file inside the project`, "pass a .tex file inside the project, or fix main in atex.toml");
   }
-  const text = readFileSync(join(root, main), "utf8");
+  const text = readBounded(join(root, main), TEX_HEAD, main, true);
 
   const variants: Variant[] = [];
   for (const v of (data.variants as Table[] | undefined) ?? []) {

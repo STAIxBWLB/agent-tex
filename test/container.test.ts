@@ -78,6 +78,17 @@ describe.skipIf(!IMAGE)("atex build in the container", () => {
     expect(fresh.json.receipt.id).toBe(first.json.receipt.id);
   }, LONG);
 
+  test("T5: XeLaTeX and LuaLaTeX reproducibility across a --fresh rebuild (measured for the README, not asserted)", async () => {
+    for (const name of ["xelatex-fontspec", "lualatex"]) {
+      const root = fixture(name, { "atex.toml": 'date = "2026-01-01"\n' });
+      const a = await atex(root);
+      const b = await atex(root, { fresh: true });
+      expect(a.code).toBe(0);
+      expect(b.code).toBe(0);
+      console.log(`T5: ${name} identical=${a.json.receipt.outputs[0].sha256 === b.json.receipt.outputs[0].sha256}`);
+    }
+  }, LONG);
+
   test("AC8: the build has no network, even with unrestricted shell escape", async () => {
     const probe = "import urllib.request\nopen('ran', 'w').close()\nurllib.request.urlopen('http://example.com', timeout=10)\nopen('net-ok', 'w').close()\n";
     const root = project({

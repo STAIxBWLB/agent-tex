@@ -64,7 +64,7 @@ async function buildCommand(args: string[], json: boolean, io: Io): Promise<numb
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === "--fresh") fresh = true;
-    else if (arg === "--out" && args[i + 1] !== undefined) out = args[++i];
+    else if (arg === "--out" && args[i + 1] !== undefined && !args[i + 1]!.startsWith("-")) out = args[++i];
     else if (!arg.startsWith("-") && main === undefined) main = arg;
     else {
       io.err(`atex build: unknown or incomplete argument: ${arg}\n  next: atex --help\n`);

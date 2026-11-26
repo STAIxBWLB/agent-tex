@@ -101,16 +101,50 @@ test("AC4: malicious output tars are refused with exit 3 and write nothing", asy
     ["no result.json", tar([["out/paper.pdf", PDF]])],
   ];
   for (const [why, data] of cases) await expect(readOutput(data, job)).rejects.toThrow(why);
-  const wrongHash = tar([["result.json", enc.encode(JSON.stringify({ v: 1, status: "ok", steps: [], outputs: [{ variant: "default", path: "out/paper.pdf", sha256: "0".repeat(64), pages: 1 }], omitted: [] }))], ["out/paper.pdf", PDF]]);
+  const step = [{ name: "latexmk", exitCode: 0, seconds: 1, upToDate: false }];
+  const wrongHash = tar([["result.json", enc.encode(JSON.stringify({ v: 1, status: "ok", steps: step, outputs: [{ variant: "default", path: "out/paper.pdf", sha256: "0".repeat(64), pages: 1 }], omitted: [] }))], ["out/paper.pdf", PDF]]);
   await expect(readOutput(wrongHash, job)).rejects.toThrow("does not match its sha256");
-  for (const data of [tar([["out/../../x.pdf", PDF]]), wrongHash]) {
-    const root = project({ "paper.tex": DOC });
+  // Every malformed class goes through build: exit 3 and an unchanged project, including an existing PDF.
+  for (const data of [...cases.map(c => c[1]), wrongHash]) {
+    const root = project({ "paper.tex": DOC, "paper.pdf": "%PDF old" });
     const before = listing(root);
     const { io: evil, log } = io(fake(() => data));
     expect(await build({ cwd: root, env: env(root) }, evil)).toBe(3);
     expect(listing(root)).toEqual(before);
     expect(log.err).toContain("rejected the container output");
   }
+});
+
+test("exit status and result must agree: exit 1 with an ok result writes nothing", async () => {
+  const root = project({ "paper.tex": DOC, "paper.pdf": "%PDF old" });
+  const { io: liar, log } = io(fake(job => ok(job), 1));
+  expect(await build({ cwd: root, env: env(root) }, liar)).toBe(3);
+  expect(readFileSync(join(root, "paper.pdf"), "latin1")).toBe("%PDF old");
+  expect(log.err).toContain("disagrees");
+});
+
+test("placement is all or nothing: a later destination that cannot be written keeps the earlier original", async () => {
+  const root = project({ "talk.tex": "\\documentclass{beamer}\n", "talk-a.pdf": "%PDF old a", "talk-b.pdf/blocker": "x", "atex.toml": '[[variants]]\nname = "a"\n[[variants]]\nname = "b"\n' });
+  const { io: good, log } = io(fake(job => ok(job)));
+  expect(await build({ cwd: root, env: env(root) }, good)).toBe(3);
+  expect(readFileSync(join(root, "talk-a.pdf"), "latin1")).toBe("%PDF old a");
+  expect(log.err).toContain("not a regular file");
+  expect(readdirSync(root).filter(n => n.includes(".atex-"))).toEqual([]);
+});
+
+test("a second build of the same project while one runs is deferred with exit 75", async () => {
+  const root = project({ "paper.tex": DOC });
+  let release!: () => void;
+  const gate = new Promise<void>(r => { release = r; });
+  const slow = fake(async job => { await gate; return ok(job); });
+  const first = build({ cwd: root, env: env(root) }, io(slow).io);
+  await Bun.sleep(50);
+  const { io: second, log } = io(fake(job => ok(job)));
+  expect(await build({ cwd: root, env: env(root) }, second)).toBe(75);
+  expect(log.err).toContain("another atex build");
+  release();
+  expect(await first).toBe(0);
+  expect(await build({ cwd: root, env: env(root) }, io(fake(job => ok(job))).io)).toBe(0);
 });
 
 test("AC9 at the CLI level: an over-cap snapshot exits 2 and no container starts", async () => {

@@ -10,6 +10,7 @@ stderr: progress (latexmk output).
 Exit: 0 built, 1 document failure (tar still written), 2 bad job or input tar (no tar written; stderr names the cause and next step).
 Caps: input entries and bytes, and each output artifact (oversize artifacts are omitted and listed in result.json).
 """
+import contextlib
 import hashlib
 import io
 import json
@@ -124,7 +125,7 @@ def read_input(stdin=None):
     if job is None:
         raise InputError("input tar has no .atex/job.json")
     main = job["main"]
-    if not os.path.isfile(os.path.join(SRC, main)):
+    if main not in received:  # a source left from the previous build does not count
         raise InputError(f"job.main {main!r} is not in the snapshot", "set main in atex.toml to a .tex file that exists and is not excluded")
     sync(received)
     return job
@@ -247,14 +248,24 @@ def add_file(tar, name, path, result):
     return digest.hexdigest()
 
 
+def discard():
+    """A refused input may have been half written: drop the cached sources so no partial snapshot is built later."""
+    shutil.rmtree(SRC, ignore_errors=True)
+    shutil.rmtree(EXT, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        os.remove(MANIFEST)
+
+
 def main():
     try:
         job = read_input()
     except InputError as err:
+        discard()
         sys.stderr.write(f"atex-run: {err}\n  next: {err.next_step}\n")
         return 2
     except (tarfile.TarError, ValueError, OSError) as err:  # ValueError covers JSON and UTF-8 decoding
-        sys.stderr.write(f"atex-run: unreadable input ({type(err).__name__}: {err})\n  next: {PROTOCOL}; atex build --fresh clears the cached copy\n")
+        discard()
+        sys.stderr.write(f"atex-run: unreadable input ({type(err).__name__}: {err})\n  next: {PROTOCOL}\n")
         return 2
     main_tex = job["main"]
     engine = job.get("engine", "pdflatex")

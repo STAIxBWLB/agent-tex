@@ -186,10 +186,16 @@ function checkResult(value: unknown, names: string[]): Result {
   if (r.v !== 1) fail("v is not 1");
   if (r.status !== "ok" && r.status !== "failed") fail("status is not ok or failed");
   if (!Array.isArray(r.steps) || !Array.isArray(r.outputs) || !Array.isArray(r.omitted)) fail("steps, outputs or omitted is not an array");
-  for (const s of r.steps as unknown[]) {
-    const step = s as Record<string, unknown>;
+  const steps = r.steps as Record<string, unknown>[];
+  for (const step of steps) {
     if (typeof step?.name !== "string" || !Number.isInteger(step.exitCode) || typeof step.seconds !== "number" || typeof step.upToDate !== "boolean") fail("malformed step");
   }
+  for (const o of r.omitted as Record<string, unknown>[]) {
+    if (typeof o?.path !== "string" || !Number.isInteger(o.bytes) || !Number.isInteger(o.cap) || typeof o.next !== "string" || o.next.length > 512) fail("malformed omitted record");
+  }
+  // ok means every step succeeded; failed means a step failed or an artifact was omitted, and lists no PDF.
+  if (r.status === "ok" && (!steps.length || steps.some(st => st.exitCode !== 0))) fail("status ok with a failed or missing step");
+  if (r.status === "failed" && ((r.outputs as unknown[]).length || (!steps.some(st => st.exitCode !== 0) && !(r.omitted as unknown[]).length))) fail("status failed is inconsistent with its steps and outputs");
   const paths = new Set(names.map(n => `out/${n}.pdf`));
   for (const o of r.outputs as unknown[]) {
     const out = o as Record<string, unknown>;

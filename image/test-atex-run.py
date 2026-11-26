@@ -38,15 +38,19 @@ def use(work):
 
 def run(payload):
     with tempfile.TemporaryDirectory() as work:
-        use(work)
-        stdin, err = sys.stdin, io.StringIO()
-        sys.stdin = io.TextIOWrapper(io.BytesIO(payload))
-        try:
-            with contextlib.redirect_stderr(err):
-                code = atex_run.main()
-        finally:
-            sys.stdin = stdin
-        return code, err.getvalue()
+        return run_in(work, payload)
+
+
+def run_in(work, payload):
+    use(work)
+    stdin, err = sys.stdin, io.StringIO()
+    sys.stdin = io.TextIOWrapper(io.BytesIO(payload))
+    try:
+        with contextlib.redirect_stderr(err):
+            code = atex_run.main()
+    finally:
+        sys.stdin = stdin
+    return code, err.getvalue()
 
 
 CASES = {
@@ -80,8 +84,19 @@ def sync_ok():
         fresh = b'{"v": 1, "main": "a.tex", "fresh": true}'
         atex_run.read_input(io.BytesIO(tar((".atex/job.json", fresh, "file"), ("src/a.tex", b"x", "file"))))
         after = sorted(os.listdir(os.path.join(work, "src")))
-    ok = kept == ["a.aux", "a.tex"] and after == ["a.tex"]
-    print(f"{'ok  ' if ok else 'FAIL'} sync and fresh" + ("" if ok else f": {kept} then {after}"))
+        # main must be in this snapshot: a copy left by the previous build does not count, and the refusal discards the cache.
+        stale = b'{"v": 1, "main": "a.tex"}'
+        try:
+            atex_run.read_input(io.BytesIO(tar((".atex/job.json", stale, "file"), ("src/b.tex", b"x", "file"))))
+            refused = False
+        except atex_run.InputError:
+            refused = True
+    with tempfile.TemporaryDirectory() as work:
+        use(work)
+        code, _ = run_in(work, tar((".atex/job.json", JOB, "file"), ("src/a.tex", b"x", "file"), ("src/../x", b"x", "file")))
+        clean = code == 2 and not os.path.exists(os.path.join(work, "src")) and not os.path.exists(os.path.join(work, "sources.json"))
+    ok = kept == ["a.aux", "a.tex"] and after == ["a.tex"] and refused and clean
+    print(f"{'ok  ' if ok else 'FAIL'} sync, fresh, stale main and discard" + ("" if ok else f": {kept} then {after}, refused={refused}, clean={clean}"))
     return ok
 
 
