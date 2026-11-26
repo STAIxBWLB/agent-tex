@@ -14,7 +14,7 @@ Usage:
   atex env pull [--json]    pull the pinned image
   atex --version            print the atex version
 
-Exit codes: 0 ok, 1 document problem, 2 usage or config error, 3 environment problem.`;
+Exit codes: 0 ok, 1 document problem, 2 usage or config error, 3 environment problem, 75 busy.`;
 
 // `image` exists so CI can drive the real CLI path against a small pinned image; the CLI itself always uses IMAGE.
 // `run` and `cli` let tests drive build without a container runtime.

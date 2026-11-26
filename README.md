@@ -23,7 +23,7 @@ atex env pull [--json]    # pull the pinned image
 atex --version
 ```
 
-Exit codes: 0 ok, 1 document problem (no PDF changes), 2 usage or config error, 3 environment problem.
+Exit codes: 0 ok, 1 document problem (no PDF changes), 2 usage or config error, 3 environment problem, 75 another build of the same project is running.
 
 ## Building
 

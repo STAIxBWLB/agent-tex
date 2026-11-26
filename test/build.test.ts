@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { build, receipt } from "../src/build.ts";
@@ -111,6 +112,7 @@ test("AC4: malicious output tars are refused with exit 3 and write nothing", asy
     const { io: evil, log } = io(fake(() => data));
     expect(await build({ cwd: root, env: env(root) }, evil)).toBe(3);
     expect(listing(root)).toEqual(before);
+    expect(Object.keys(existsSync(env(root).XDG_STATE_HOME) ? listing(env(root).XDG_STATE_HOME) : {})).toEqual([]); // no state file, lock released
     expect(log.err).toContain("rejected the container output");
   }
 });
@@ -145,6 +147,29 @@ test("a second build of the same project while one runs is deferred with exit 75
   release();
   expect(await first).toBe(0);
   expect(await build({ cwd: root, env: env(root) }, io(fake(job => ok(job))).io)).toBe(0);
+});
+
+const stateOf = (root: string) => join(env(root).XDG_STATE_HOME, "atex", "projects", createHash("sha256").update(root).digest("hex").slice(0, 16));
+
+test("a lock left by a dead build is reported, not taken over", async () => {
+  const root = project({ "paper.tex": DOC });
+  const dead = Bun.spawnSync(["true"]).pid;
+  mkdirSync(stateOf(root), { recursive: true });
+  writeFileSync(join(stateOf(root), "lock"), String(dead));
+  const { io: second, log } = io(fake(job => ok(job)));
+  expect(await build({ cwd: root, env: env(root) }, second)).toBe(75);
+  expect(log.err).toContain("did not finish");
+  expect(log.err).toContain(`remove ${join(stateOf(root), "lock")}`);
+});
+
+test("a receipt that cannot be written rolls the PDFs back", async () => {
+  const root = project({ "paper.tex": DOC, "paper.pdf": "%PDF old" });
+  mkdirSync(join(stateOf(root), "last", "receipt.json"), { recursive: true });
+  const { io: good, log } = io(fake(job => ok(job)));
+  expect(await build({ cwd: root, env: env(root) }, good)).toBe(3);
+  expect(readFileSync(join(root, "paper.pdf"), "latin1")).toBe("%PDF old");
+  expect(log.err).toContain("the previous PDFs were restored");
+  expect(readdirSync(root).filter(n => n.includes(".atex-"))).toEqual([]);
 });
 
 test("AC9 at the CLI level: an over-cap snapshot exits 2 and no container starts", async () => {

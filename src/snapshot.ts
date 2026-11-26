@@ -92,7 +92,14 @@ export function scan(cfg: Config): Snapshot {
     }
   };
   walk(cfg.root, cfg.root, "src/", new Set([realpathSync(cfg.root)]));
-  for (const e of cfg.snapshot.extra) walk(e.path, e.path, `ext/${e.as}/`, new Set([realpathSync(e.path)]));
+  for (const e of cfg.snapshot.extra) {
+    // An extra root is a chosen directory, but it must not itself be (or sit inside) a secret location.
+    const real = realpathSync(e.path);
+    if (real.split(sep).some(part => part && secret(part))) {
+      throw new SnapshotError(`[snapshot] extra ${e.as} lies inside a secret location`, "point extra at a directory outside .git, .env* and key folders");
+    }
+    walk(e.path, e.path, `ext/${e.as}/`, new Set([real]));
+  }
   return { entries, bytes };
 }
 
@@ -100,7 +107,7 @@ export function scan(cfg: Config): Snapshot {
 function readEntry(e: Entry): Uint8Array {
   const changed = () => new SnapshotError(`${e.name} changed while it was being sent`, "rerun atex build when the file is no longer being written");
   let fd: number;
-  try { fd = openSync(e.path, constants.O_RDONLY | constants.O_NOFOLLOW); } catch { throw changed(); }
+  try { fd = openSync(e.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); } catch { throw changed(); }
   try {
     const st = fstatSync(fd);
     if (!st.isFile() || st.dev !== e.dev || st.ino !== e.ino || st.size !== e.size) throw changed();

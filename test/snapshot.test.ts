@@ -30,6 +30,12 @@ test("AC5: a permitted link that resolves to a secret is not sent", async () => 
   expect(names.sort()).toEqual([".atex/job.json", "src/paper.tex"]);
 });
 
+test("AC5: an extra root inside a secret location is refused", () => {
+  const shared = project({ ".env.d/macros.sty": "x" });
+  const root = project({ "paper.tex": DOC, "atex.toml": `[snapshot]\nextra = [{ path = "${join(shared, ".env.d")}", as = "m" }]\n` });
+  expect(() => scan(loadConfig({ cwd: root, env: env(root) }))).toThrow("secret location");
+});
+
 test("AC9: caps and escaping symlinks fail during the scan, before any container", () => {
   const big = project({ "paper.tex": DOC, "atex.toml": "[snapshot]\nmaxBytes = 100\n", "data.bin": "x".repeat(200) });
   expect(() => scan(loadConfig({ cwd: big, env: env(big) }))).toThrow("over 100 bytes");

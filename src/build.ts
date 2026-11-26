@@ -1,6 +1,6 @@
 // atex build (issue #3): config → snapshot → container → validated output → PDFs, state and receipt.
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ConfigError, loadConfig, type Config } from "./config.ts";
 import { dockerArgv, runContainer, volumeName, type Runner } from "./executor/docker.ts";
@@ -37,11 +37,13 @@ class OutputError extends Error {
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException)?.code ?? "unknown error";
 
+interface Commit { rollback: () => string[]; finish: () => void }
+
 /**
- * Stage every PDF beside its destination, then swap them in, keeping each original aside until all are in place.
- * Any failure restores the originals, so the destinations change all together or not at all.
+ * Stage every PDF beside its destination, then swap them in, keeping each original aside. The caller finishes the
+ * commit once the receipt is written, or rolls it back; rollback returns the paths it could not restore.
  */
-function place(pdfs: { dest: string; bytes: Uint8Array }[]): void {
+function place(pdfs: { dest: string; bytes: Uint8Array }[]): Commit {
   for (const p of pdfs) {
     if (existsSync(p.dest) && !lstatSync(p.dest).isFile()) throw new OutputError(`${p.dest} exists and is not a regular file`, "remove it or choose another --out");
   }
@@ -49,6 +51,16 @@ function place(pdfs: { dest: string; bytes: Uint8Array }[]): void {
   const temp = (dest: string, kind: string) => join(dirname(dest), `.${basename(dest)}.atex-${kind}-${tag}`);
   const staged: string[] = [];
   const done: { dest: string; backup: string | null }[] = [];
+  const rollback = () => {
+    const lost: string[] = [];
+    for (const d of done.reverse()) {
+      try { if (d.backup) renameSync(d.backup, d.dest); else rmSync(d.dest, { force: true }); }
+      catch { lost.push(d.backup ? `${d.dest} (its previous version is ${d.backup})` : d.dest); }
+    }
+    done.length = 0;
+    return lost;
+  };
+  const cleanup = () => { for (const t of staged) rmSync(t, { force: true }); };
   try {
     for (const p of pdfs) {
       try {
@@ -66,35 +78,52 @@ function place(pdfs: { dest: string; bytes: Uint8Array }[]): void {
         done.push({ dest: p.dest, backup });
         renameSync(staged[i]!, p.dest);
       } catch (error) {
-        for (const d of done.reverse()) {
-          try { if (d.backup) renameSync(d.backup, d.dest); else rmSync(d.dest, { force: true }); } catch { /* reported below */ }
-        }
-        done.length = 0;
-        throw new OutputError(`could not replace ${p.dest} (${errno(error)}); the previous PDFs were restored`, `check that ${dirname(p.dest)} is writable`);
+        throw new OutputError(restored(`could not replace ${p.dest} (${errno(error)})`, rollback()), `check that ${dirname(p.dest)} is writable`);
       }
     });
-  } finally {
-    for (const t of staged) rmSync(t, { force: true });
-    for (const d of done) if (d.backup) rmSync(d.backup, { force: true });
+  } catch (error) {
+    cleanup();
+    throw error;
   }
+  cleanup();
+  return { rollback, finish: () => { for (const d of done) if (d.backup) rmSync(d.backup, { force: true }); } };
 }
 
-/** One build per project at a time: the cache volume holds one mutable source tree. Returns a release, or null when busy. */
-function lock(dir: string): (() => void) | null {
+/** Describe a rollback truthfully: everything restored, or which paths were not. */
+function restored(cause: string, lost: string[]): string {
+  return lost.length ? `${cause}; could not restore ${lost.join(", ")}` : `${cause}; the previous PDFs were restored`;
+}
+
+/**
+ * One build per project at a time: the cache volume holds one mutable source tree. Returns a release, or the
+ * holder's pid when busy. A lock left by a build that died is not taken over automatically (no safe primitive for
+ * that here); the message names the file to remove.
+ */
+function lock(dir: string): { release: () => void } | { holder: string; file: string } {
   const file = join(dir, "lock");
   mkdirSync(dir, { recursive: true });
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      writeFileSync(file, String(process.pid), { flag: "wx" });
-      return () => rmSync(file, { force: true });
-    } catch (error) {
-      if (errno(error) !== "EEXIST") throw error;
-      const pid = Number(readFileSync(file, "utf8"));
-      try { if (Number.isInteger(pid) && pid > 0) { process.kill(pid, 0); return null; } } catch { /* holder is gone: stale lock */ }
-      rmSync(file, { force: true });
-    }
+  try {
+    writeFileSync(file, String(process.pid), { flag: "wx" });
+    return { release: () => rmSync(file, { force: true }) };
+  } catch (error) {
+    if (errno(error) !== "EEXIST") throw error;
   }
-  return null;
+  let holder = "unknown";
+  try {
+    const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      if (fstatSync(fd).isFile()) {
+        const buf = Buffer.alloc(16);
+        const text = buf.subarray(0, readSync(fd, buf, 0, 16, 0)).toString("utf8");
+        if (/^[0-9]{1,10}$/.test(text)) holder = text;
+      }
+    } finally { closeSync(fd); }
+  } catch { /* unreadable lock record: report it as unknown */ }
+  return { holder, file };
+}
+
+function alive(pid: string): boolean {
+  try { process.kill(Number(pid), 0); return true; } catch (error) { return errno(error) === "EPERM"; }
 }
 
 function fail(io: BuildIo, code: number, message: string, next: string): number {
@@ -115,14 +144,18 @@ export async function build(opts: BuildOptions, io: BuildIo): Promise<number> {
   const cli = io.cli ?? findCli();
   if (!cli) return fail(io, 3, `none of ${RUNTIMES.join(", ")} is installed`, "atex env check");
   const dir = join(cfg.stateDir, "projects", projectId(cfg.root));
-  let release: (() => void) | null;
-  try { release = lock(dir); }
+  let held;
+  try { held = lock(dir); }
   catch (error) { return fail(io, 3, `could not use the state directory (${errno(error)})`, `check that ${cfg.stateDir} is writable, or set XDG_STATE_HOME`); }
-  if (!release) return fail(io, 75, "another atex build of this project is running", "wait for it to finish, then rerun atex build");
+  if ("holder" in held) {
+    return held.holder !== "unknown" && alive(held.holder)
+      ? fail(io, 75, `another atex build of this project is running (pid ${held.holder})`, "wait for it to finish, then rerun atex build")
+      : fail(io, 75, `a previous atex build of this project did not finish (lock ${held.file}, pid ${held.holder})`, `if no atex build is running, remove ${held.file} and rerun`);
+  }
   try {
     return await run(cfg, snap, cli, dir, opts, io);
   } finally {
-    release();
+    held.release();
   }
 }
 
@@ -175,8 +208,9 @@ async function run(cfg: Config, snap: ReturnType<typeof scan>, cli: string, dir:
   const names = cfg.variants.length ? cfg.variants.map(v => `${basename(cfg.main, ".tex")}-${v.name}`) : [basename(cfg.main, ".tex")];
   // readOutput guarantees one listed, hash-checked PDF per jobname when the status is ok.
   const listed = names.map(n => result.outputs.find(o => o.path === `out/${n}.pdf`)!);
+  let commit: Commit;
   try {
-    place(names.map((n, i) => ({ dest: cfg.outputs[i]!, bytes: pdfs.get(n)! })));
+    commit = place(names.map((n, i) => ({ dest: cfg.outputs[i]!, bytes: pdfs.get(n)! })));
   } catch (error) {
     if (error instanceof OutputError) return fail(io, 3, error.message, error.next);
     throw error;
@@ -185,7 +219,13 @@ async function run(cfg: Config, snap: ReturnType<typeof scan>, cli: string, dir:
     v: 1, tool: "atex", sourceTreeSha256: tree, image, engine: cfg.engine, dateEpoch: cfg.dateEpoch,
     outputs: listed.map((o, i) => ({ name: basename(cfg.outputs[i]!), sha256: o.sha256, pages: o.pages })),
   });
-  try { writeFileSync(join(last, "receipt.json"), JSON.stringify(r, null, 2) + "\n"); } catch (error) { return stateFailed(error); }
+  // The PDFs and the receipt are published together: a receipt that cannot be written undoes the PDFs.
+  try {
+    writeFileSync(join(last, "receipt.json"), JSON.stringify(r, null, 2) + "\n");
+  } catch (error) {
+    return fail(io, 3, restored(`could not write the receipt (${errno(error)})`, commit.rollback()), `check that ${cfg.stateDir} is writable, or set XDG_STATE_HOME`);
+  }
+  commit.finish();
   if (opts.json) io.out(`${JSON.stringify({ v: 1, status: "ok", receipt: r, outputs: cfg.outputs, steps: result.steps })}\n`);
   else io.out(`${cfg.outputs.map((o, i) => `atex build: ${o} (${r.outputs[i]!.pages ?? "?"} pages)`).join("\n")}\n  receipt ${r.id}\n`);
   return 0;
