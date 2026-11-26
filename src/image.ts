@@ -3,7 +3,7 @@
 export const IMAGE = {
   repo: "ghcr.io/staixbwlb/agent-tex",
   tag: "2026.2",
-  digest: "",
+  digest: "sha256:5ff4bdb27e976f81f0c6462e2cc1af28217cac8af5260152c53b3f13a49c5e30",
 } as const;
 
 export type ImagePin = { repo: string; tag: string; digest: string };
