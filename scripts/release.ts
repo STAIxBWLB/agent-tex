@@ -119,7 +119,9 @@ export function stageRelease(dir: string, root = process.cwd()): ReleaseManifest
   if (existsSync(target)) fail("stage directory already exists; choose a fresh directory");
   mkdirSync(target, { mode: 0o700 }); const work = mkdtempSync(join(tmpdir(), "atex-release-pack-"));
   try {
-    const packed: unknown = JSON.parse(command("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", target], root, isolatedEnv(work)));
+    const raw: unknown = JSON.parse(command("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", target], root, isolatedEnv(work)));
+    // npm 11 prints an array of packs; npm 12 prints an object keyed by package name.
+    const packed: unknown = plain(raw) ? Object.values(raw) : raw;
     if (!Array.isArray(packed) || packed.length !== 1 || !plain(packed[0]) || packed[0].name !== expected.name || packed[0].version !== expected.version || typeof packed[0].filename !== "string" || !/^[A-Za-z0-9._-]+\.tgz$/.test(packed[0].filename)) fail("npm pack must stage exactly one matching package");
     renameSync(join(target, packed[0].filename), join(target, "package.tgz"));
     const bytes = readBytesBounded(join(target, "package.tgz"), ARCHIVE_BYTES, { noFollow: true });
