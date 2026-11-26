@@ -4,9 +4,20 @@ Container-only LaTeX and Beamer builds for coding agents, part of the agent fami
 
 Status: P1 (environment image). The plan of record and delivery phases are in issue #1.
 
+## Install
+
+Requires Bun 1.4.2 or later and a Docker-compatible runtime (docker, podman or nerdctl). TeX is never installed on the host.
+
+```sh
+bun add -g @staix/agent-tex
+atex env pull    # pulls the pinned image (several GB)
+atex env check
+```
+
 ## Commands
 
 ```sh
+atex --version
 atex env check [--json]   # container runtime, pinned image present or not
 atex env pull [--json]    # pull the pinned image
 ```

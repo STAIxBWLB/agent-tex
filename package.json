@@ -1,6 +1,6 @@
 {
   "name": "@staix/agent-tex",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Container-only LaTeX and Beamer builds for the agent family: structured diagnostics, checks and page renders over a CLI and an MCP server (atex)",
   "license": "MIT",
   "type": "module",
@@ -29,6 +29,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "check": "bun x tsc --noEmit && bun scripts/check-boundary.ts && bun test && bun pm pack --dry-run"
+    "check": "bun x tsc --noEmit && bun scripts/check-boundary.ts && bun test && bun pm pack --dry-run",
+    "release:prepare": "bun scripts/release-tag.ts prepare",
+    "release:tag": "bun scripts/release-tag.ts tag",
+    "release:stage": "bun scripts/release.ts stage",
+    "release:smoke": "bun scripts/release-smoke.ts"
   }
 }

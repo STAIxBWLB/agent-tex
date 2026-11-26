@@ -1,10 +1,12 @@
 import { envCheck, envPull, exec, type EnvReport, type Exec } from "./env.ts";
 import { IMAGE, type ImagePin } from "./image.ts";
+import { version } from "../package.json";
 
 // Exit codes (issue #1): 0 success, 1 document problem, 2 usage or config error, 3 environment problem, 75 deferred.
 const USAGE = `atex: container-only LaTeX builds
 
 Usage:
+  atex --version            print the atex version
   atex env check [--json]   report the container runtime and the pinned image
   atex env pull [--json]    pull the pinned image
 
@@ -32,6 +34,10 @@ export async function main(argv: string[], io: Io = defaultIo): Promise<number> 
   const args = argv.filter(arg => arg !== "--json");
   if (args.length === 0 || args[0] === "help" || args[0] === "--help" || args[0] === "-h") {
     io.out(`${USAGE}\n`);
+    return 0;
+  }
+  if (args.length === 1 && args[0] === "--version") {
+    io.out(`${version}\n`);
     return 0;
   }
   const [command, sub, ...rest] = args;

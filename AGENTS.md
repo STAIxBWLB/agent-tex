@@ -13,6 +13,7 @@
 - Keep unimplemented phases out of the CLI and README command list.
 - Public repo: no internal host names, accounts or manuscript names in code, tests, issues or PRs.
 - Conventional English commits, no coauthor trailers unless requested.
+- Release: follow `docs/releasing.md` (read it before any release step). Agents run `release:prepare` on a branch; tagging, the npm bootstrap and repository settings only on the owner's instruction.
 
 <!-- AGENT_HUB:BEGIN (managed by `ahub init`, edits inside are overwritten) -->
 ## agent-hub
