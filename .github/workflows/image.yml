@@ -124,6 +124,18 @@ jobs:
           echo "atex env pull -> exit $code, $(jq -r .status <<< "$out")"
           [ "$code" = 0 ] && [ "$(jq -r .status <<< "$out")" = ready ] || { echo "$out"; exit 1; }
           bun bin/atex.js env check
+      - name: Build a PDF with the default pinned image
+        run: |
+          project=$(mktemp -d "$RUNNER_TEMP/atex-pinned.XXXXXX")
+          cp -R image/fixtures/pdflatex-bibtex/. "$project"
+          rm "$project/job.json"
+          expected=$(bun bin/atex.js env check --json | jq -er '.image.ref')
+          (
+            cd "$project"
+            XDG_STATE_HOME="$RUNNER_TEMP/atex-pinned-state" bun "$GITHUB_WORKSPACE/bin/atex.js" build --json > "$RUNNER_TEMP/atex-pinned-build.json"
+            test -s paper.pdf
+          )
+          jq -e --arg image "$expected" '.status == "ok" and .receipt.image == $image' "$RUNNER_TEMP/atex-pinned-build.json"
 
   publish:
     if: startsWith(github.ref, 'refs/tags/image-v')
