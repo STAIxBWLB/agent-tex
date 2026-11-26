@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { build, receipt } from "../src/build.ts";
@@ -112,7 +112,7 @@ test("AC4: malicious output tars are refused with exit 3 and write nothing", asy
     const { io: evil, log } = io(fake(() => data));
     expect(await build({ cwd: root, env: env(root) }, evil)).toBe(3);
     expect(listing(root)).toEqual(before);
-    expect(Object.keys(existsSync(env(root).XDG_STATE_HOME) ? listing(env(root).XDG_STATE_HOME) : {})).toEqual([]); // no state file, lock released
+    expect(existsSync(env(root).XDG_STATE_HOME)).toBe(false);
     expect(log.err).toContain("rejected the container output");
   }
 });
@@ -154,12 +154,17 @@ const stateOf = (root: string) => join(env(root).XDG_STATE_HOME, "atex", "projec
 test("a lock left by a dead build is reported, not taken over", async () => {
   const root = project({ "paper.tex": DOC });
   const dead = Bun.spawnSync(["true"]).pid;
-  mkdirSync(stateOf(root), { recursive: true });
-  writeFileSync(join(stateOf(root), "lock"), String(dead));
-  const { io: second, log } = io(fake(job => ok(job)));
-  expect(await build({ cwd: root, env: env(root) }, second)).toBe(75);
-  expect(log.err).toContain("did not finish");
-  expect(log.err).toContain(`remove ${join(stateOf(root), "lock")}`);
+  const id = createHash("sha256").update(root).digest("hex").slice(0, 16);
+  const lock = join("/tmp", `atex-build-${process.getuid?.() ?? 0}-${id}.lock`);
+  writeFileSync(lock, String(dead), { flag: "wx" });
+  try {
+    const { io: second, log } = io(fake(job => ok(job)));
+    expect(await build({ cwd: root, env: env(root) }, second)).toBe(75);
+    expect(log.err).toContain("did not finish");
+    expect(log.err).toContain(`remove ${lock}`);
+  } finally {
+    unlinkSync(lock);
+  }
 });
 
 test("a receipt that cannot be written rolls the PDFs back", async () => {

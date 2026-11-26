@@ -1,6 +1,6 @@
 // atex build (issue #3): config → snapshot → container → validated output → PDFs, state and receipt.
 import { createHash, randomUUID } from "node:crypto";
-import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { ConfigError, loadConfig, type Config } from "./config.ts";
 import { dockerArgv, runContainer, volumeName, type Runner } from "./executor/docker.ts";
@@ -43,11 +43,11 @@ interface Commit { rollback: () => string[]; finish: () => void }
  * Stage every PDF beside its destination, then swap them in, keeping each original aside. The caller finishes the
  * commit once the receipt is written, or rolls it back; rollback returns the paths it could not restore.
  */
-function place(pdfs: { dest: string; bytes: Uint8Array }[]): Commit {
+function place(pdfs: { dest: string; bytes: Uint8Array }[], io: BuildIo): Commit {
   for (const p of pdfs) {
     if (existsSync(p.dest) && !lstatSync(p.dest).isFile()) throw new OutputError(`${p.dest} exists and is not a regular file`, "remove it or choose another --out");
   }
-  const tag = randomUUID().slice(0, 8);
+  const tag = randomUUID();
   const temp = (dest: string, kind: string) => join(dirname(dest), `.${basename(dest)}.atex-${kind}-${tag}`);
   const staged: string[] = [];
   const done: { dest: string; backup: string | null }[] = [];
@@ -60,13 +60,13 @@ function place(pdfs: { dest: string; bytes: Uint8Array }[]): Commit {
     done.length = 0;
     return lost;
   };
-  const cleanup = () => { for (const t of staged) rmSync(t, { force: true }); };
+  const cleanup = () => { for (const t of staged) removeTemporary(t, io); };
   try {
     for (const p of pdfs) {
       try {
         mkdirSync(dirname(p.dest), { recursive: true });
         staged.push(temp(p.dest, "new"));
-        writeFileSync(staged.at(-1)!, p.bytes);
+        writeFileSync(staged.at(-1)!, p.bytes, { flag: "wx" });
       } catch (error) {
         throw new OutputError(`could not write beside ${p.dest} (${errno(error)})`, `check that ${dirname(p.dest)} is writable and has space`);
       }
@@ -86,7 +86,7 @@ function place(pdfs: { dest: string; bytes: Uint8Array }[]): Commit {
     throw error;
   }
   cleanup();
-  return { rollback, finish: () => { for (const d of done) if (d.backup) rmSync(d.backup, { force: true }); } };
+  return { rollback, finish: () => { for (const d of done) if (d.backup) removeTemporary(d.backup, io); } };
 }
 
 /** Describe a rollback truthfully: everything restored, or which paths were not. */
@@ -99,11 +99,9 @@ function restored(cause: string, lost: string[]): string {
  * holder's pid when busy. A lock left by a build that died is not taken over automatically (no safe primitive for
  * that here); the message names the file to remove.
  */
-function lock(dir: string): { release: () => void } | { holder: string; file: string } {
-  const file = join(dir, "lock");
-  mkdirSync(dir, { recursive: true });
+function lock(file: string): { release: () => void } | { holder: string; file: string } {
   try {
-    writeFileSync(file, String(process.pid), { flag: "wx" });
+    writeFileSync(file, String(process.pid), { flag: "wx", mode: 0o600 });
     return { release: () => rmSync(file, { force: true }) };
   } catch (error) {
     if (errno(error) !== "EEXIST") throw error;
@@ -115,7 +113,7 @@ function lock(dir: string): { release: () => void } | { holder: string; file: st
       if (fstatSync(fd).isFile()) {
         const buf = Buffer.alloc(16);
         const text = buf.subarray(0, readSync(fd, buf, 0, 16, 0)).toString("utf8");
-        if (/^[0-9]{1,10}$/.test(text)) holder = text;
+        if (/^[1-9][0-9]{0,9}$/.test(text) && Number(text) <= 0x7fffffff) holder = text;
       }
     } finally { closeSync(fd); }
   } catch { /* unreadable lock record: report it as unknown */ }
@@ -124,6 +122,11 @@ function lock(dir: string): { release: () => void } | { holder: string; file: st
 
 function alive(pid: string): boolean {
   try { process.kill(Number(pid), 0); return true; } catch (error) { return errno(error) === "EPERM"; }
+}
+
+function removeTemporary(file: string, io: BuildIo): void {
+  try { rmSync(file, { force: true }); }
+  catch (error) { io.err(`atex build: could not remove temporary file ${file} (${errno(error)})\n  next: remove it after checking permissions\n`); }
 }
 
 function fail(io: BuildIo, code: number, message: string, next: string): number {
@@ -145,8 +148,8 @@ export async function build(opts: BuildOptions, io: BuildIo): Promise<number> {
   if (!cli) return fail(io, 3, `none of ${RUNTIMES.join(", ")} is installed`, "atex env check");
   const dir = join(cfg.stateDir, "projects", projectId(cfg.root));
   let held;
-  try { held = lock(dir); }
-  catch (error) { return fail(io, 3, `could not use the state directory (${errno(error)})`, `check that ${cfg.stateDir} is writable, or set XDG_STATE_HOME`); }
+  try { held = lock(join("/tmp", `atex-build-${process.getuid?.() ?? 0}-${projectId(realpathSync(cfg.root))}.lock`)); }
+  catch (error) { return fail(io, 3, `could not acquire the build lock (${errno(error)})`, "check that /tmp is writable and the project directory still exists"); }
   if ("holder" in held) {
     return held.holder !== "unknown" && alive(held.holder)
       ? fail(io, 75, `another atex build of this project is running (pid ${held.holder})`, "wait for it to finish, then rerun atex build")
@@ -155,7 +158,8 @@ export async function build(opts: BuildOptions, io: BuildIo): Promise<number> {
   try {
     return await run(cfg, snap, cli, dir, opts, io);
   } finally {
-    held.release();
+    try { held.release(); }
+    catch (error) { io.err(`atex build: could not release the project lock (${errno(error)})\n  next: retry after checking /tmp permissions and the lock status\n`); }
   }
 }
 
@@ -210,19 +214,22 @@ async function run(cfg: Config, snap: ReturnType<typeof scan>, cli: string, dir:
   const listed = names.map(n => result.outputs.find(o => o.path === `out/${n}.pdf`)!);
   let commit: Commit;
   try {
-    commit = place(names.map((n, i) => ({ dest: cfg.outputs[i]!, bytes: pdfs.get(n)! })));
+    commit = place(names.map((n, i) => ({ dest: cfg.outputs[i]!, bytes: pdfs.get(n)! })), io);
   } catch (error) {
     if (error instanceof OutputError) return fail(io, 3, error.message, error.next);
-    throw error;
+    return fail(io, 3, `could not prepare the PDF destinations (${errno(error)})`, "check the output paths and their permissions, or choose another --out");
   }
   const r = receipt({
     v: 1, tool: "atex", sourceTreeSha256: tree, image, engine: cfg.engine, dateEpoch: cfg.dateEpoch,
     outputs: listed.map((o, i) => ({ name: basename(cfg.outputs[i]!), sha256: o.sha256, pages: o.pages })),
   });
   // The PDFs and the receipt are published together: a receipt that cannot be written undoes the PDFs.
+  const stagedReceipt = join(last, `.receipt-${randomUUID()}.tmp`);
   try {
-    writeFileSync(join(last, "receipt.json"), JSON.stringify(r, null, 2) + "\n");
+    writeFileSync(stagedReceipt, JSON.stringify(r, null, 2) + "\n", { flag: "wx" });
+    renameSync(stagedReceipt, join(last, "receipt.json"));
   } catch (error) {
+    removeTemporary(stagedReceipt, io);
     return fail(io, 3, restored(`could not write the receipt (${errno(error)})`, commit.rollback()), `check that ${cfg.stateDir} is writable, or set XDG_STATE_HOME`);
   }
   commit.finish();
